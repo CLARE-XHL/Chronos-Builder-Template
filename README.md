@@ -1,4 +1,4 @@
-# Chronos Seal V2.0 — 云端编译模板
+# Chronos Seal V2.1 — 云端编译模板
 
 > **此仓库是模板仓库，不要直接使用。请 Fork 到自己的 GitHub 账户，并设为私有仓库。**
 
@@ -6,25 +6,27 @@
 
 ## 这是什么？
 
-这是 Chronos Seal V2.0 的云端编译模板。你不需要在本地安装任何编译工具（不需要 Node.js、Python、MSVC、OpenSSL），只需要：
+这是 Chronos Seal V2.1 的云端编译模板。你不需要在本地安装任何编译工具（不需要 Node.js、Python、MSVC、OpenSSL），只需要：
 
 1. Fork 本仓库（设为私有）
-2. 放入你的 `config.h` 和 `system.json`
+2. 放入你的 `system.json`
 3. 在 GitHub Actions 中填写游戏名称和版本号
-4. 等待 2-3 分钟，下载专属的 `.node` 和 `.enc` 文件
+4. 等待 2-3 分钟，下载专属的 `.node` 和配置文件
 5. 删除 Fork 仓库（日志销毁，密钥不泄露）
 
 ---
 
 ## 前置条件
 
-在开始之前，你需要先用 `ChronosScan.bat` 生成 `config.h`：
+在开始之前，你需要准备好以下内容：
 
-1. 下载 Chronos Seal V2.0 发行包
-2. 将 `ChronosScan.bat` 放入你的 RPG Maker 项目根目录
-3. 双击运行，生成 `checkpoints_guide.txt` 和 `config.h`
-4. 按照 `checkpoints_guide.txt` 的说明，在游戏中植入检查点
-5. 将 `config.h` 保存好，下一步会用到
+1. 下载 Chronos Seal V2.1 发行包
+2. 将 `auth_manager.js` 放入 `js/plugins/` 目录
+3. 在 RPG Maker 插件管理器中启用 `auth_manager.js`
+4. 在公共事件中配置 `AuthManager.initialize()` 和心跳
+5. 准备好你的 `system.json`（游戏工程中的 `data/system.json`，明文）
+
+> ⚠️ V2.1 不再需要 `config.h`，也不需要运行 `ChronosScan.bat`。
 
 ---
 
@@ -38,9 +40,8 @@
 
 ### 第二步：上传你的文件
 
-将以下两个文件上传到你的 Fork 仓库根目录：
+将以下文件上传到你的 Fork 仓库根目录：
 
-- `config.h`（由 `ChronosScan.bat` 生成，包含检查点白名单）
 - `system.json`（你的游戏工程中的 `data/system.json`，明文）
 
 > ⚠️ 不要上传其他文件，不要修改目录结构。
@@ -52,11 +53,9 @@
 3. 点击右侧的 **Run workflow** 按钮
 4. 填写以下参数：
 
-| 参数 | 说明 | 示例 |
-|:---|:---|:---|
-| 游戏名称 | 你的游戏名称 | `MyGame` |
-| 游戏版本号 | 当前版本号 | `1.0.0` |
-| 截止日期 | 时间炸弹截止日期（留空则永不过期） | `2027-01-01` |
+- 游戏名称：你的游戏名称。示例：MyGame
+- 游戏版本号：当前版本号。示例：1.0.0
+- 截止日期：时间炸弹截止日期（留空则永不过期）。示例：2027-01-01
 
 5. 点击 **Run workflow**，等待编译完成（约 2-3 分钟）
 
@@ -69,19 +68,19 @@
 
 解压后，你会得到三个文件：
 
-| 文件 | 用途 | 存放位置 |
-|:---|:---|:---|
-| `decryptor.node` | C++ 原生插件 | 游戏根目录 |
-| `system.json.enc` | 加密后的 system.json | 游戏 `data/` 目录（替换原文件） |
-| `author_secret.txt` | 作者专属密钥 | **离线保存，绝对不要放进游戏包！** |
+- decryptor.node —— C++ 原生插件，放入游戏发行包根目录
+- encrypt_config.json —— 素材加密配置，用于本地加密阶段
+- author_secret.txt —— 作者专属密钥，离线保存，绝对不要放进游戏包！
 
 ### 第五步：部署到游戏
 
-1. 将 `decryptor.node` 放入游戏根目录
-2. 将 `system.json.enc` 放入 `data/` 目录，替换原有的 `system.json`
-3. 确保 `auth_manager.js` 已在 `js/plugins/` 中，并在插件管理器中启用
-4. 确保 `index.html` 已按 README 修改启动时序
-5. 打包发布
+1. 将 `decryptor.node` 放入发行包根目录
+2. 将 `encrypt_config.json` 放入发行包根目录（加密阶段使用）
+3. 将 `encrypt_assets.bat` 和 `encrypt_assets.js` 放入发行包根目录（从 CS 发行包获取）
+4. 双击 `encrypt_assets.bat` 加密所有素材
+5. 删除 `encrypt_config.json`、`encrypt_assets.bat`、`encrypt_assets.js`
+6. 确保 `index.html` 已替换为 CS 版本
+7. 打包发布
 
 ### 第六步：删除 Fork 仓库（重要！）
 
@@ -100,18 +99,16 @@
 `author_secret.txt` 包含：
 
 - 游戏名称和版本号
-- 衍生种子（Salt）
-- HMAC 盐值
-- IV（初始化向量）
-- 检查点白名单
+- 派生种子（Salt）
+- 发行日期
 
 **这份文件是游戏加密的唯一凭证。**
 
-- ✅ 丢失后无法恢复，加密将永久失效
-- ✅ 泄露后加密将完全失效
-- ✅ 建议保存到至少两个不同的物理设备（如本地硬盘 + U盘）
-- ❌ 绝对禁止随游戏发行包一起发布
-- ❌ 绝对禁止上传到任何云端存储（除非加密后）
+- 丢失后无法恢复，加密将永久失效
+- 泄露后加密将完全失效
+- 建议保存到至少两个不同的物理设备（如本地硬盘 + U盘）
+- 绝对禁止随游戏发行包一起发布
+- 绝对禁止上传到任何云端存储（除非加密后）
 
 ---
 
@@ -120,36 +117,44 @@
 当你要发布游戏更新时：
 
 1. 在 RPG Maker 中修改游戏内容
-2. 重新运行 `ChronosScan.bat`（如果地图有变化）
-3. 将新的 `config.h` 和 `system.json` 上传到你的 Fork 仓库（或重新 Fork）
-4. 在 Actions 中输入**新的版本号**
-5. 下载新的 `.node` 和 `.enc` 文件
+2. 将新的 `system.json` 上传到你的 Fork 仓库（或重新 Fork）
+3. 在 Actions 中输入**新的版本号**
+4. 下载新的 `decryptor.node` 和 `encrypt_config.json`
+5. 重新运行 `encrypt_assets.bat` 加密素材
 6. 替换游戏包中的旧文件，重新发布
 
-旧版本生成的 `.node` 和 `.enc` 会自动失效，因为版本号变了。
+旧版本生成的 `.node` 和加密素材会自动失效，因为版本号变了，密钥也随之变化。
 
 ---
 
 ## 常见问题
 
-**Q: 为什么必须设私有仓库？**
+Q: 为什么必须设私有仓库？
 
 A: 因为 Actions 日志中会包含密钥信息。私有仓库的日志只有你自己能看，公开仓库的日志全世界都能看。
 
-**Q: 我 Fork 了之后，这个模板仓库更新了怎么办？**
+Q: 我 Fork 了之后，这个模板仓库更新了怎么办？
 
 A: 你的 Fork 是独立的，不会被自动同步。如果需要新功能，可以重新 Fork 最新的模板仓库，或者手动更新你的 Fork。
 
-**Q: 编译失败了怎么办？**
+Q: 编译失败了怎么办？
 
 A: 检查以下几点：
-1. `config.h` 是否在仓库根目录（不是子文件夹）
-2. `system.json` 是否在仓库根目录
-3. 检查 Actions 日志中的错误信息
+1. `system.json` 是否在仓库根目录（不是子文件夹）
+2. 检查 Actions 日志中的错误信息
+3. 确认 `system.json` 是合法的 JSON 格式
 
-**Q: 我可以多次运行 Actions 吗？**
+Q: 我可以多次运行 Actions 吗？
 
-A: 可以。每次运行都会生成新的密钥和 `.node` 文件。旧的 `.node` 文件将无法解密新生成的 `.enc` 文件。
+A: 可以。每次运行都会生成新的密钥和 `.node` 文件。旧的 `.node` 文件将无法解密新加密的素材。
+
+Q: V2.1 还需要 `config.h` 吗？
+
+A: 不需要。V2.1 改用 `-D` 宏在编译时传入所有参数，`config.h` 已移除。
+
+Q: V2.1 还需要 `ChronosScan.bat` 吗？
+
+A: 不需要。V2.1 已移除检查点功能，不再需要扫描地图。
 
 ---
 
@@ -157,6 +162,5 @@ A: 可以。每次运行都会生成新的密钥和 `.node` 文件。旧的 `.no
 
 本模板仓库采用 MIT 许可证。生成的 `.node` 文件版权归游戏作者所有。
 
----
 
 **⭐ 如果这个项目对你有帮助，请给主仓库一个 Star！**
