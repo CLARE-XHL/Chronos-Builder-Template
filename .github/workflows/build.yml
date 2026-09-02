@@ -1,4 +1,4 @@
-name: Chronos Seal V2.0 Builder
+name: Build Chronos Seal
 
 on:
   workflow_dispatch:
@@ -28,7 +28,30 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装 OpenSSL（vcpkg 方式，最可靠）
+      # ============================================================
+      # 1. 读取 system.json 获取游戏名称和版本号
+      # ============================================================
+      - name: 读取 system.json
+        id: read_system
+        run: |
+          if (Test-Path "system.json") {
+            $json = Get-Content -Path "system.json" -Raw | ConvertFrom-Json
+            $gameTitle = $json.gameTitle
+            if ([string]::IsNullOrEmpty($gameTitle)) {
+              $gameTitle = "${{ github.event.inputs.game_name }}"
+            }
+            echo "game_title=$gameTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            echo "✅ system.json 读取成功: $gameTitle"
+          } else {
+            echo "⚠️ system.json 不存在，使用输入的游戏名称"
+            echo "game_title=${{ github.event.inputs.game_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          }
+        shell: powershell
+
+      # ============================================================
+      # 2. 安装 OpenSSL（vcpkg 方式）
+      # ============================================================
+      - name: 安装 OpenSSL
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
@@ -38,7 +61,10 @@ jobs:
           echo "INCLUDE=$env:INCLUDE;$env:GITHUB_WORKSPACE\vcpkg\installed\x64-windows\include" >> $env:GITHUB_ENV
         shell: powershell
 
-      - name: 安装 Node.js 14.x（匹配 NW.js 0.48 的 ABI）
+      # ============================================================
+      # 3. 安装 Node.js 14.x（匹配 NW.js 0.48 的 ABI）
+      # ============================================================
+      - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '14.x'
@@ -46,7 +72,20 @@ jobs:
       - name: 安装 node-gyp
         run: npm install -g node-gyp
 
-      - name: 解析时间炸弹截止日期
+      # ============================================================
+      # 4. 生成随机派生种子
+      # ============================================================
+      - name: 生成派生种子
+        id: gen
+        run: |
+          $seed = [Convert]::ToBase64String((New-Object byte[] 32 | ForEach-Object { Get-Random -Maximum 256 }))
+          echo "seed=$seed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+        shell: powershell
+
+      # ============================================================
+      # 5. 解析截止日期
+      # ============================================================
+      - name: 解析截止日期
         id: expire
         run: |
           if ("${{ github.event.inputs.expiration_date }}" -eq "") {
@@ -58,102 +97,54 @@ jobs:
           }
         shell: powershell
 
-      - name: 生成随机 Salt 和 IV
-        id: gen
-        run: |
-          $salt = [Convert]::ToBase64String((New-Object byte[] 32 | ForEach-Object { Get-Random -Maximum 256 }))
-          $iv = -join ((0..15) | ForEach-Object { "{0:x2}" -f (Get-Random -Maximum 256) })
-          echo "salt=$salt" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          echo "iv=$iv" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        shell: powershell
-
-      - name: 规范化 config.h（去除 BOM，统一 LF 换行）
-        run: |
-          $content = Get-Content -Path config.h -Raw -Encoding UTF8
-          $content = $content -replace "`r`n", "`n"
-          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-          [System.IO.File]::WriteAllText("config_clean.h", $content, $utf8NoBom)
-        shell: powershell
-
-      - name: 动态生成完整 config.h
-        run: |
-          $gameVersion = "${{ github.event.inputs.game_version }}"
-          $releaseDate = (Get-Date -Format "yyyy-MM-dd")
-          $salt = "${{ steps.gen.outputs.salt }}"
-          $expire = "${{ steps.expire.outputs.timestamp }}"
-
-          # 读取检查点白名单（从 config_clean.h 提取）
-          $checkpoints = Select-String -Path config_clean.h -Pattern '"map_transition_\d+"' | ForEach-Object { $_.Matches.Value }
-
-          # 构建完整的 config.h
-          $configContent = @"
-          /**
-           * Chronos Seal V2.0 - config.h
-           * 由 GitHub Actions 云端编译时动态生成
-           */
-          #ifndef CONFIG_H
-          #define CONFIG_H
-          #include <string>
-          #include <vector>
-          #include <ctime>
-          namespace Config {
-              const std::string GAME_VERSION = "$gameVersion";
-              const std::string RELEASE_DATE = "$releaseDate";
-              const std::string DERIVATION_SEED = "$salt";
-              const std::string HMAC_SALT = "$salt";
-              const time_t HARD_EXPIRE = $expire;
-              const std::vector<std::string> CHECKPOINT_WHITELIST = {
-          "@
-          foreach ($cp in $checkpoints) {
-              $configContent += "          $cp,`n"
-          }
-          $configContent += @"
-              };
-              const int WATCHDOG_TIMEOUT_SEC = 10;
-              const int WATCHDOG_MAX_MISS = 2;
-              const std::string AUTH_KEY_PATH = "./auth/auth.key";
-              const std::string SYSTEM_JSON_ENC_PATH = "./auth/system.json.enc";
-              const std::string SYSTEM_JSON_PATH = "./system.json";
-              const std::string OVERWRITE_FAILED_FLAG = "./auth/.overwrite_failed";
-          }
-          #endif
-          "@
-
-          # 写入 src/config.h（UTF-8 无 BOM）
-          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
-          [System.IO.File]::WriteAllText("src/config.h", $configContent, $utf8NoBom)
-        shell: powershell
-
+      # ============================================================
+      # 6. 编译 decryptor.node（通过 -D 宏传入参数）
+      # ============================================================
       - name: 编译 decryptor.node
         run: |
           cd native
           node-gyp configure
-          node-gyp build --release
+          node-gyp build --release `
+            -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
+            -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
+            -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
+            -DHARD_EXPIRE="${{ steps.expire.outputs.timestamp }}" `
+            -DWATCHDOG_TIMEOUT_SEC=10 `
+            -DWATCHDOG_MAX_MISS=2
+        shell: powershell
 
-      - name: 执行预加密
+      # ============================================================
+      # 7. 生成 encrypt_config.json（给本地加密脚本用）
+      # ============================================================
+      - name: 生成加密配置
         run: |
-          node scripts/encrypt.js "${{ steps.gen.outputs.iv }}"
+          $config = @{
+            gameName = "${{ steps.read_system.outputs.game_title }}"
+            version = "${{ github.event.inputs.game_version }}"
+            date = (Get-Date -Format "yyyy-MM-dd")
+            seed = "${{ steps.gen.outputs.seed }}"
+          }
+          $json = $config | ConvertTo-Json
+          $utf8NoBom = New-Object System.Text.UTF8Encoding $false
+          [System.IO.File]::WriteAllText("encrypt_config.json", $json, $utf8NoBom)
+        shell: powershell
 
-      - name: 生成 author_secret.txt
+      # ============================================================
+      # 8. 生成 author_secret.txt（作者备份密钥）
+      # ============================================================
+      - name: 生成作者密钥
         run: |
           $content = @"
           ============================================================
-          Chronos Seal V2.0 — 作者专属密钥
+          Chronos Seal V2.1 — 作者专属密钥
           ⚠️ 此文件是游戏加密的唯一凭证，请妥善保管！
-          游戏名称:     ${{ github.event.inputs.game_name }}
+          游戏名称:     ${{ steps.read_system.outputs.game_title }}
           版本号:       ${{ github.event.inputs.game_version }}
+          发行日期:     $(Get-Date -Format "yyyy-MM-dd")
           截止日期:     ${{ github.event.inputs.expiration_date }}
+          派生种子:     ${{ steps.gen.outputs.seed }}
           生成时间:     $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
-          Salt:         ${{ steps.gen.outputs.salt }}
-          HMAC_SALT:    ${{ steps.gen.outputs.salt }}
-          IV:           ${{ steps.gen.outputs.iv }}
-          检查点列表:
-          "@
-          $checkpoints = Select-String -Path config.h -Pattern '"map_transition_\d+"' | ForEach-Object { $_.Matches.Value }
-          foreach ($cp in $checkpoints) {
-              $content += "  $cp`n"
-          }
-          $content += @"
+          ============================================================
           警告：此文件绝对禁止随游戏发行包一起发布！
           ============================================================
           "@
@@ -161,25 +152,35 @@ jobs:
           [System.IO.File]::WriteAllText("author_secret.txt", $content, $utf8NoBom)
         shell: powershell
 
-      - name: 输出校验
+      # ============================================================
+      # 9. 输出校验
+      # ============================================================
+      - name: 校验产物
         id: verify
         run: |
           if (-not (Test-Path "native\build\Release\decryptor.node")) {
             Write-Error "编译失败：decryptor.node 未生成"
             exit 1
           }
-          if (-not (Test-Path "system.json.enc")) {
-            Write-Error "加密失败：system.json.enc 未生成"
+          if (-not (Test-Path "encrypt_config.json")) {
+            Write-Error "加密配置未生成"
+            exit 1
+          }
+          if (-not (Test-Path "author_secret.txt")) {
+            Write-Error "作者密钥未生成"
             exit 1
           }
           Write-Output "✅ 所有产物生成成功"
         shell: powershell
 
+      # ============================================================
+      # 10. 上传产物
+      # ============================================================
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: chronos-seal-output
           path: |
             native\build\Release\decryptor.node
-            system.json.enc
+            encrypt_config.json
             author_secret.txt
