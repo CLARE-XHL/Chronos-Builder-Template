@@ -2,6 +2,11 @@
 
 云端编译模板 — Fork 到私有仓库，一键生成专属 .node 加密文件。
 
+> 📌 **本仓库为 Chronos Seal 的云端编译模板仓库，仅用于 Fork 后运行 GitHub Actions。**
+> 
+> 如需提交 Issue、查看完整文档或了解项目详情，请移步主仓库：
+> [https://github.com/CLARE-XHL/Chronos-Seal](https://github.com/CLARE-XHL/Chronos-Seal)
+
 
 ## 使用方法
 
