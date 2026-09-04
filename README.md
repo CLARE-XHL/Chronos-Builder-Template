@@ -36,6 +36,21 @@ Actions → Build Chronos Seal → Run workflow → 填写参数（游戏名称�
 
 ## 许可证
 
-MIT
+本项目采用 MIT 许可证开源，详见 [LICENSE](LICENSE) 文件。
+
+使用本软件时，请遵守以下约定：
+
+- ✅ 允许：将 Chronos Seal 集成到你的商业或免费游戏中，闭源售卖你的游戏
+- ✅ 允许：修改源码用于你自己的项目
+- ✅ 允许：在遵守 MIT 协议的前提下进行分发
+- ❌ 严禁：将 Chronos Seal 的源码或编译产物（.node 文件）作为独立商品直接售卖
+- ❌ 严禁：删除或隐藏版权声明后销售 Chronos Seal 本体
+
+**简单来说：你可以卖用了 Chronos Seal 的游戏，但不能直接卖 Chronos Seal 本身。**
+
+---
+
+*本声明是对 MIT 许可证的补充说明，不改变 MIT 许可证的授权条款。*
+
 
 **⭐ 如果这个项目对你有帮助，请给主仓库一个 Star！**
