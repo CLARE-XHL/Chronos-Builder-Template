@@ -25,7 +25,7 @@ Actions → Build Chronos Seal → Run workflow → 填写参数（游戏名称�
 
 ## 完整文档
 
-详细使用说明请查看：[Chronos Seal 文档站](https://docs.nookinc.org)
+详细使用说明请查看：[Chronos Seal 文档站](https://docs.crclare.top)
 
 
 ## 与主仓库的关系
