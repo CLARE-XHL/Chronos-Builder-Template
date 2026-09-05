@@ -7,6 +7,7 @@ on:
         description: '游戏名称（如 MyGame）'
         required: true
         type: string
+        default: 'Going Future Part 1'
       game_version:
         description: '游戏版本号（如 1.0.0）'
         required: true
@@ -28,21 +29,11 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 读取 system.json
-        id: read_system
+      # 不读取 system.json，直接使用输入的游戏名称
+      - name: 设置游戏名称
+        id: game
         run: |
-          if (Test-Path "system.json") {
-            $json = Get-Content -Path "system.json" -Raw | ConvertFrom-Json
-            $gameTitle = $json.gameTitle
-            if ([string]::IsNullOrEmpty($gameTitle)) {
-              $gameTitle = "${{ github.event.inputs.game_name }}"
-            }
-            "game_title=$gameTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-            Write-Host "✅ system.json 读取成功: $gameTitle"
-          } else {
-            Write-Host "⚠️ system.json 不存在，使用输入的游戏名称"
-            "game_title=${{ github.event.inputs.game_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          }
+          echo "game_title=${{ github.event.inputs.game_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
         shell: powershell
 
       - name: 安装 OpenSSL
@@ -99,7 +90,7 @@ jobs:
       - name: 生成加密配置
         run: |
           $config = @{
-            gameName = "${{ steps.read_system.outputs.game_title }}"
+            gameName = "${{ steps.game.outputs.game_title }}"
             version = "${{ github.event.inputs.game_version }}"
             date = (Get-Date -Format "yyyy-MM-dd")
             seed = "${{ steps.gen.outputs.seed }}"
@@ -115,7 +106,7 @@ jobs:
           ============================================================
           Chronos Seal V2.1 — 作者专属密钥
           ⚠️ 此文件是游戏加密的唯一凭证，请妥善保管！
-          游戏名称:     ${{ steps.read_system.outputs.game_title }}
+          游戏名称:     ${{ steps.game.outputs.game_title }}
           版本号:       ${{ github.event.inputs.game_version }}
           发行日期:     $(Get-Date -Format "yyyy-MM-dd")
           截止日期:     ${{ github.event.inputs.expiration_date }}
