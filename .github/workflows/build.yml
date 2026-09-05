@@ -34,8 +34,6 @@ jobs:
           echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
           echo "OPENSSL_LIBRARIES=C:\Program Files\OpenSSL-Win64\lib" >> $env:GITHUB_ENV
           echo "OPENSSL_INCLUDE_DIR=C:\Program Files\OpenSSL-Win64\include" >> $env:GITHUB_ENV
-          echo "LIB=$env:LIB;C:\Program Files\OpenSSL-Win64\lib" >> $env:GITHUB_ENV
-          echo "INCLUDE=$env:INCLUDE;C:\Program Files\OpenSSL-Win64\include" >> $env:GITHUB_ENV
         shell: powershell
 
       - name: 安装 Node.js
@@ -92,11 +90,15 @@ jobs:
 
           npm install node-addon-api
 
-          # 直接使用 binding.gyp 中的 -llibssl 和 -llibcrypto
-          # 不需要动态生成，因为库路径已通过环境变量传递
-
           node-gyp configure --msvs_version=2022
-          node-gyp build --release --msvs_version=2022
+
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
+          if (-not $msbuild) {
+            Write-Error "MSBuild not found"
+            exit 1
+          }
+
+          & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="C:\Program Files\OpenSSL-Win64\lib" /m
         shell: powershell
 
       - name: 生成加密配置
@@ -135,7 +137,7 @@ jobs:
       - name: 校验产物
         id: verify
         run: |
-          $nodePath = "native\build\Release\decryptor.node"
+          $nodePath = "build\Release\decryptor.node"
           if (-not (Test-Path $nodePath)) {
             Write-Error "decryptor.node not found at: $nodePath"
             exit 1
@@ -156,6 +158,6 @@ jobs:
         with:
           name: chronos-seal-output
           path: |
-            native\build\Release\decryptor.node
+            build\Release\decryptor.node
             encrypt_config.json
             author_secret.txt
