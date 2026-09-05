@@ -105,7 +105,8 @@ jobs:
             Write-Error "MSBuild not found"
             exit 1
           }
-          & $msbuild decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:AdditionalLibraryDirectories="$openSslLibPath" /p:AdditionalDependencies="libssl.lib;libcrypto.lib" /m
+          # 只传递库路径，不传递 AdditionalDependencies（已在模板中写死）
+          & $msbuild decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:AdditionalLibraryDirectories="$openSslLibPath" /m
           if (Test-Path "Release\decryptor.node") {
             Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
           }
