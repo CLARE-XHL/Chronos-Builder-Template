@@ -4,15 +4,15 @@ on:
   workflow_dispatch:
     inputs:
       game_name:
-        description: '游戏名称（必填，如 Going Future Part 1）'
+        description: '游戏名称（必填）'
         required: true
         type: string
       game_version:
-        description: '游戏版本号（必填，如 1.0.0）'
+        description: '游戏版本号（必填）'
         required: true
         type: string
       expiration_date:
-        description: '截止日期（YYYY-MM-DD，留空则永不过期）'
+        description: '截止日期（YYYY-MM-DD，留空永不过期）'
         required: false
         type: string
         default: ''
@@ -45,7 +45,7 @@ jobs:
           .\vcpkg\vcpkg install openssl:x64-windows
         shell: powershell
 
-      - name: 设置 OpenSSL 环境变量
+      - name: 设置 OpenSSL 环境
         run: |
           $vcpkgRoot = (Get-Item .\vcpkg).FullName
           echo "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
@@ -63,7 +63,7 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装 node-gyp（稳定版）
+      - name: 安装 node-gyp
         run: npm install -g node-gyp@9.4.0
         shell: powershell
 
@@ -88,12 +88,15 @@ jobs:
 
       - name: 编译 decryptor.node
         run: |
+          # 定位 VS 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
           if (-not $vspath) {
             Write-Error "Visual Studio 2022 not found"
             exit 1
           }
+          Write-Host "VS path: $vspath"
 
+          # 设置编译环境
           $env:VCINSTALLDIR = "$vspath\VC"
           $env:VSINSTALLDIR = $vspath
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
@@ -104,16 +107,30 @@ jobs:
           $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;$env:LIB"
 
           cd native
+
+          # 安装 node-addon-api
           npm install node-addon-api
+
+          # 生成 VS 项目
           node-gyp configure --msvs_version=2022
 
+          # OpenSSL 库路径
+          $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
+          Write-Host "OpenSSL lib path: $openSslLibPath"
+
+          # 查看实际库文件
+          Write-Host "=== Library files ==="
+          Get-ChildItem $openSslLibPath -Filter *.lib | ForEach-Object { Write-Host $_.Name }
+
+          # 查找 MSBuild
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
           if (-not $msbuild) {
             Write-Error "MSBuild not found"
             exit 1
           }
+          Write-Host "MSBuild: $msbuild"
 
-          $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
+          # 编译
           & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="$openSslLibPath" /m
         shell: powershell
 
