@@ -41,19 +41,14 @@ jobs:
         with:
           node-version: '18.x'
 
-      - name: 下载 Node.js 头文件
-        run: |
-          mkdir node-headers
-          cd node-headers
-          curl -L -o node-headers.tar.gz https://nodejs.org/download/release/v18.20.8/node-v18.20.8-headers.tar.gz
-          tar -xzf node-headers.tar.gz
-          echo "NODE_HEADERS_DIR=$env:GITHUB_WORKSPACE\node-headers\node-v18.20.8" >> $env:GITHUB_ENV
-        shell: powershell
-
       - name: 安装 Python 3.10
         uses: actions/setup-python@v5
         with:
           python-version: '3.10'
+
+      - name: 安装 node-gyp
+        run: npm install -g node-gyp@9.4.0
+        shell: powershell
 
       - name: 安装 node-addon-api
         run: npm install node-addon-api
@@ -95,28 +90,9 @@ jobs:
           $env:INCLUDE = "$($env:VCToolsInstallDir)\include;C:\Program Files\OpenSSL-Win64\include;$env:INCLUDE"
           $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;C:\Program Files\OpenSSL-Win64\lib;$env:LIB"
           cd native
-          $nodeHeadersDir = "$env:NODE_HEADERS_DIR"
-          if (-not (Test-Path $nodeHeadersDir)) {
-            $nodeHeadersDir = "C:\hostedtoolcache\windows\node\18.20.8\x64\include\node"
-          }
-          $openSslIncludePath = "C:\Program Files\OpenSSL-Win64\include"
-          $openSslLibPath = "C:\Program Files\OpenSSL-Win64\lib"
-          $template = Get-Content "decryptor.vcxproj.template" -Raw
-          $template = $template -replace "NODE_INCLUDE_PATH", $nodeHeadersDir
-          $template = $template -replace "OPENSSL_INCLUDE_PATH", $openSslIncludePath
-          $template = $template -replace "OPENSSL_LIB_PATH", $openSslLibPath
-          Set-Content -Path "decryptor.vcxproj" -Value $template
-          $hookTemplate = Get-Content "win_delay_load_hook.cc.template" -Raw
-          Set-Content -Path "win_delay_load_hook.cc" -Value $hookTemplate
-          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
-          if (-not $msbuild) {
-            Write-Error "MSBuild not found"
-            exit 1
-          }
-          & $msbuild decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:AdditionalLibraryDirectories="$openSslLibPath" /m
-          if (Test-Path "Release\decryptor.node") {
-            Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
-          }
+          npm install node-addon-api
+          node-gyp configure --msvs_version=2022
+          node-gyp build --release --msvs_version=2022
         shell: powershell
 
       - name: 生成加密配置
@@ -155,7 +131,7 @@ jobs:
       - name: 校验产物
         id: verify
         run: |
-          if (-not (Test-Path "decryptor.node")) {
+          if (-not (Test-Path "native\build\Release\decryptor.node")) {
             Write-Error "decryptor.node not found"
             exit 1
           }
@@ -175,6 +151,6 @@ jobs:
         with:
           name: chronos-seal-output
           path: |
-            decryptor.node
+            native\build\Release\decryptor.node
             encrypt_config.json
             author_secret.txt
