@@ -307,7 +307,6 @@ void init_openssl() {
 // V2.1：密钥派生函数（AES 和 HMAC 分离）
 // ============================================================
 
-// FIX: 密钥派生失败时返回空字符串，而非全零
 std::string derive_aes_key() {
     std::string data = "AES:" + std::string(GAME_VERSION) + RELEASE_DATE;
     std::string key = hmac_sha256(data, DERIVATION_SEED);
@@ -391,17 +390,12 @@ std::string aes_encrypt(const std::string& plaintext, const unsigned char* key,
     return ciphertext;
 }
 
-/**
- * AES 解密（返回错误码）
- * 返回: { ok: bool, data: string, errCode: int }
- */
 struct DecryptResult {
     bool ok;
     std::string data;
     int errCode;
 };
 
-// FIX: OpenSSL 错误队列清空封装
 static void openssl_clear_err() {
     while (ERR_get_error() != 0) {}
 }
@@ -412,14 +406,14 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
 
     if (iv.size() != 16) {
         result.errCode = ERR_INVALID_FORMAT;
-        openssl_clear_err();  // FIX
+        openssl_clear_err();
         return result;
     }
 
     EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
     if (!ctx) {
         result.errCode = ERR_UNKNOWN;
-        openssl_clear_err();  // FIX
+        openssl_clear_err();
         return result;
     }
 
@@ -435,7 +429,7 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
                            static_cast<int>(ciphertext.size()))) {
         EVP_CIPHER_CTX_free(ctx);
         result.errCode = ERR_DECRYPT_PADDING;
-        openssl_clear_err();  // FIX
+        openssl_clear_err();
         return result;
     }
     total = len;
@@ -445,7 +439,7 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
                              reinterpret_cast<unsigned char*>(&plaintext[total]), &final_len)) {
         EVP_CIPHER_CTX_free(ctx);
         result.errCode = ERR_DECRYPT_PADDING;
-        openssl_clear_err();  // FIX
+        openssl_clear_err();
         return result;
     }
     total += final_len;
@@ -464,11 +458,6 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
 // 素材解密接口（核心）
 // ============================================================
 
-/**
- * 解密素材文件
- * 存储格式: [MAGIC(8) + IV(16) + HMAC(32) + AES密文]
- * 解密流程: 1. 验证魔数 2. 提取 IV 和 HMAC 3. 验证 HMAC 4. AES 解密
- */
 Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     Napi::Object result = Napi::Object::New(env);
@@ -499,7 +488,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     const uint8_t* data = reinterpret_cast<const uint8_t*>(encrypted_buf.Data());
 
-    // FIX: 验证魔数
     if (!constant_time_equals(data, MAGIC_BYTES, MAGIC_LEN)) {
         result.Set("ok", Napi::Boolean::New(env, false));
         result.Set("errCode", Napi::Number::New(env, ERR_INVALID_FORMAT));
@@ -507,22 +495,15 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // 提取 IV
     std::string iv(reinterpret_cast<const char*>(data + MAGIC_LEN), IV_LEN);
-
-    // 提取 HMAC
     std::string stored_hmac(reinterpret_cast<const char*>(data + MAGIC_LEN + IV_LEN), HMAC_LEN);
-
-    // 提取密文
     std::string ciphertext(
         reinterpret_cast<const char*>(data + ASSET_HEADER_LEN),
         data_size - ASSET_HEADER_LEN);
 
-    // 派生密钥
     std::string aes_key = derive_aes_key();
     std::string hmac_key = derive_hmac_key();
 
-    // FIX: 密钥为空时明确报错
     if (aes_key.empty() || hmac_key.empty()) {
         result.Set("ok", Napi::Boolean::New(env, false));
         result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
@@ -530,7 +511,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // FIX: 固定时间 HMAC 比较
     std::string computed_hmac = hmac_sha256(ciphertext, hmac_key);
     if (computed_hmac.size() != HMAC_LEN ||
         !constant_time_equals(
@@ -619,7 +599,6 @@ void watchdog_thread_func() {
         if (g_watchdog.watchdog_exit.load()) break;
 
         if (!g_watchdog.heartbeat_received.load()) {
-            // FIX: 简化计数逻辑
             g_watchdog.missed_heartbeats.fetch_add(1);
             int misses = g_watchdog.missed_heartbeats.load();
             write_watchdog_log("Missed heartbeat #" + std::to_string(misses));
@@ -677,7 +656,7 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// Node-API 模块注册
+// Node-API 模块注册（修正版）
 // ============================================================
 
 Napi::Object Init(Napi::Env env, Napi::Object exports) {
