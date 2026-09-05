@@ -31,7 +31,7 @@
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <TargetName>decryptor</TargetName>
     <TargetExt>.node</TargetExt>
-    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);NODE_INCLUDE_PATH;OPENSSL_INCLUDE_PATH</IncludePath>
+    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);NODE_INCLUDE_PATH;NODE_INCLUDE_PATH\..;OPENSSL_INCLUDE_PATH</IncludePath>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -42,7 +42,7 @@
       <SDLCheck>true</SDLCheck>
       <ConformanceMode>true</ConformanceMode>
       <PreprocessorDefinitions>NAPI_DISABLE_CPP_EXCEPTIONS;WIN32;_CRT_SECURE_NO_DEPRECATE;_CRT_NONSTDC_NO_DEPRECATE;BUILDING_NODE_EXTENSION;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>NODE_INCLUDE_PATH;OPENSSL_INCLUDE_PATH;.\node_modules\node-addon-api;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>NODE_INCLUDE_PATH;NODE_INCLUDE_PATH\..;OPENSSL_INCLUDE_PATH;.\node_modules\node-addon-api;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <ExceptionHandling>false</ExceptionHandling>
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
