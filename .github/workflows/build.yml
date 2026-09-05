@@ -73,21 +73,17 @@ jobs:
 
       - name: 编译 decryptor.node
         run: |
-          # 使用 vswhere 定位 Visual Studio 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
           if ($vspath) {
-            Write-Host "找到 Visual Studio 2022 路径: $vspath"
             $env:VCINSTALLDIR = "$vspath\VC"
             $env:VSINSTALLDIR = $vspath
             $msvcPath = Get-ChildItem "$vspath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
             if ($msvcPath) {
-              # 拆分三行，避开 PowerShell 转义解析
               $msvcBin = "$($msvcPath.FullName)\bin\HostX64\x64"
               $env:PATH = "$env:PATH;$msvcBin"
-              Write-Host "MSVC 工具链已加入 PATH"
             }
           } else {
-            Write-Error "未找到 Visual Studio 2022！"
+            Write-Error "VS2022 not found"
             exit 1
           }
 
@@ -139,18 +135,18 @@ jobs:
         id: verify
         run: |
           if (-not (Test-Path "native\build\Release\decryptor.node")) {
-            Write-Error "编译失败：decryptor.node 未生成"
+            Write-Error "decryptor.node not found"
             exit 1
           }
           if (-not (Test-Path "encrypt_config.json")) {
-            Write-Error "加密配置未生成"
+            Write-Error "encrypt_config.json not found"
             exit 1
           }
           if (-not (Test-Path "author_secret.txt")) {
-            Write-Error "作者密钥未生成"
+            Write-Error "author_secret.txt not found"
             exit 1
           }
-          Write-Output "✅ 所有产物生成成功"
+          Write-Output "All artifacts generated successfully"
         shell: powershell
 
       - name: 上传产物
