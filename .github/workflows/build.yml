@@ -93,6 +93,9 @@ jobs:
 
           cd native
 
+          # 安装 node-addon-api（binding.gyp 依赖它）
+          npm install node-addon-api
+
           # 生成 Visual Studio 项目文件
           node-gyp configure --msvs_version=2022
 
