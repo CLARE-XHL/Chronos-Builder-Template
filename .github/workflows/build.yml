@@ -76,16 +76,18 @@ jobs:
           # 使用 vswhere 定位 Visual Studio 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
           if ($vspath) {
-            Write-Host "✅ 找到 Visual Studio 2022 路径: $vspath"
+            Write-Host "找到 Visual Studio 2022 路径: $vspath"
             $env:VCINSTALLDIR = "$vspath\VC"
             $env:VSINSTALLDIR = $vspath
             $msvcPath = Get-ChildItem "$vspath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
             if ($msvcPath) {
-              $env:PATH += ";$($msvcPath.FullName)\bin\HostX64\x64"
-              Write-Host "✅ MSVC 工具链路径: $($msvcPath.FullName)"
+              # 拆分三行，避开 PowerShell 转义解析
+              $msvcBin = "$($msvcPath.FullName)\bin\HostX64\x64"
+              $env:PATH = "$env:PATH;$msvcBin"
+              Write-Host "MSVC 工具链已加入 PATH"
             }
           } else {
-            Write-Error "❌ 未找到 Visual Studio 2022！"
+            Write-Error "未找到 Visual Studio 2022！"
             exit 1
           }
 
