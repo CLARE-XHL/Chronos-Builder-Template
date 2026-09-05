@@ -83,13 +83,15 @@ jobs:
         shell: powershell
 
       # ============================================================
-      # 5. 解析截止日期
+      # 5. 解析截止日期（修复：留空时为 2147483647，而非 0）
       # ============================================================
       - name: 解析截止日期
         id: expire
         run: |
           if ("${{ github.event.inputs.expiration_date }}" -eq "") {
-            echo "timestamp=0" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            # 留空表示永不过期，传入 2147483647 (2038-01-19 03:14:07)
+            # 只要大于当前时间，游戏就不会过期
+            echo "timestamp=2147483647" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           } else {
             $date = [datetime]::ParseExact("${{ github.event.inputs.expiration_date }}", "yyyy-MM-dd", $null)
             $timestamp = [int](($date.ToUniversalTime() - (Get-Date "1970-01-01")).TotalSeconds)
