@@ -71,7 +71,7 @@ jobs:
           }
         shell: powershell
 
-      - name: 编译 decryptor.node（手动 MSBuild）
+      - name: 编译 decryptor.node
         run: |
           # 使用 vswhere 定位 Visual Studio 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
@@ -99,16 +99,14 @@ jobs:
           # 生成 Visual Studio 项目文件
           node-gyp configure --msvs_version=2022
 
-          # 查找 MSBuild
-          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
-          if (-not $msbuild) {
-            Write-Error "MSBuild not found"
-            exit 1
-          }
-          Write-Host "Using MSBuild at: $msbuild"
-
-          # 编译
-          & $msbuild build\decryptor.sln /p:Configuration=Release /p:Platform=x64 /m
+          # 使用 node-gyp build 编译（避免手动找 .sln 路径）
+          node-gyp build --release --msvs_version=2022 `
+            -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
+            -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
+            -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
+            -DHARD_EXPIRE="${{ steps.expire.outputs.timestamp }}" `
+            -DWATCHDOG_TIMEOUT_SEC=10 `
+            -DWATCHDOG_MAX_MISS=2
         shell: powershell
 
       - name: 生成加密配置
