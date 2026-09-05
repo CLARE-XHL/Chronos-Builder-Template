@@ -54,6 +54,16 @@ jobs:
           Write-Host "OpenSSL installed at: $vcpkgRoot"
         shell: powershell
 
+      - name: 查看 OpenSSL 库文件（诊断）
+        run: |
+          $libPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
+          Write-Host "=== 库目录: $libPath ==="
+          Get-ChildItem $libPath -Filter *.lib | ForEach-Object { Write-Host "找到: $($_.Name)" }
+          Get-ChildItem $libPath -Filter *.a | ForEach-Object { Write-Host "找到: $($_.Name)" }
+          Write-Host "=== 查找 ssl 相关文件 ==="
+          Get-ChildItem $libPath -Filter *ssl* | ForEach-Object { Write-Host "找到: $($_.Name)" }
+        shell: powershell
+
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
@@ -123,11 +133,11 @@ jobs:
           }
           Write-Host "Using MSBuild at: $msbuild"
 
-          # OpenSSL 库路径
+          # OpenSSL 库路径（静态库和动态库都传）
           $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
           Write-Host "OpenSSL lib path: $openSslLibPath"
 
-          # 手动编译，只传 LIBPATH
+          # 手动编译，传递 LIBPATH
           & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="$openSslLibPath" /m
         shell: powershell
 
