@@ -29,7 +29,7 @@ jobs:
         uses: actions/checkout@v4
 
       # ============================================================
-      # 1. 读取 system.json 获取游戏名称和版本号
+      # 1. 读取 system.json 获取游戏名称
       # ============================================================
       - name: 读取 system.json
         id: read_system
@@ -40,14 +40,12 @@ jobs:
             if ([string]::IsNullOrEmpty($gameTitle)) {
               $gameTitle = "${{ github.event.inputs.game_name }}"
             }
-            # 转义双引号，防止字符串解析错误
-            $escapedTitle = $gameTitle -replace '"', '\"'
-            "game_title=$escapedTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            # 直接输出，不转义（游戏名不含双引号时最安全）
+            "game_title=$gameTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
             Write-Host "✅ system.json 读取成功: $gameTitle"
           } else {
             Write-Host "⚠️ system.json 不存在，使用输入的游戏名称"
-            $escapedInput = "${{ github.event.inputs.game_name }}" -replace '"', '\"'
-            "game_title=$escapedInput" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "game_title=${{ github.event.inputs.game_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
         shell: powershell
 
@@ -86,13 +84,12 @@ jobs:
         shell: powershell
 
       # ============================================================
-      # 5. 解析截止日期（修复：留空时为 2147483647，而非 0）
+      # 5. 解析截止日期（修复：留空时为 2147483647）
       # ============================================================
       - name: 解析截止日期
         id: expire
         run: |
           if ("${{ github.event.inputs.expiration_date }}" -eq "") {
-            # 留空表示永不过期，传入 2147483647 (2038-01-19 03:14:07)
             echo "timestamp=2147483647" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           } else {
             $date = [datetime]::ParseExact("${{ github.event.inputs.expiration_date }}", "yyyy-MM-dd", $null)
@@ -102,7 +99,7 @@ jobs:
         shell: powershell
 
       # ============================================================
-      # 6. 编译 decryptor.node（通过 -D 宏传入参数）
+      # 6. 编译 decryptor.node
       # ============================================================
       - name: 编译 decryptor.node
         run: |
@@ -118,7 +115,7 @@ jobs:
         shell: powershell
 
       # ============================================================
-      # 7. 生成 encrypt_config.json（给本地加密脚本用）
+      # 7. 生成 encrypt_config.json
       # ============================================================
       - name: 生成加密配置
         run: |
@@ -134,7 +131,7 @@ jobs:
         shell: powershell
 
       # ============================================================
-      # 8. 生成 author_secret.txt（作者备份密钥）
+      # 8. 生成 author_secret.txt
       # ============================================================
       - name: 生成作者密钥
         run: |
@@ -157,7 +154,7 @@ jobs:
         shell: powershell
 
       # ============================================================
-      # 9. 输出校验
+      # 9. 校验产物
       # ============================================================
       - name: 校验产物
         id: verify
