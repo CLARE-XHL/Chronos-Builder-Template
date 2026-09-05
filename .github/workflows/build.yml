@@ -40,11 +40,14 @@ jobs:
             if ([string]::IsNullOrEmpty($gameTitle)) {
               $gameTitle = "${{ github.event.inputs.game_name }}"
             }
-            echo "game_title=$gameTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-            echo "✅ system.json 读取成功: $gameTitle"
+            # 转义双引号，防止字符串解析错误
+            $escapedTitle = $gameTitle -replace '"', '\"'
+            "game_title=$escapedTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "✅ system.json 读取成功: $gameTitle"
           } else {
-            echo "⚠️ system.json 不存在，使用输入的游戏名称"
-            echo "game_title=${{ github.event.inputs.game_name }}" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            Write-Host "⚠️ system.json 不存在，使用输入的游戏名称"
+            $escapedInput = "${{ github.event.inputs.game_name }}" -replace '"', '\"'
+            "game_title=$escapedInput" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
         shell: powershell
 
@@ -90,7 +93,6 @@ jobs:
         run: |
           if ("${{ github.event.inputs.expiration_date }}" -eq "") {
             # 留空表示永不过期，传入 2147483647 (2038-01-19 03:14:07)
-            # 只要大于当前时间，游戏就不会过期
             echo "timestamp=2147483647" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           } else {
             $date = [datetime]::ParseExact("${{ github.event.inputs.expiration_date }}", "yyyy-MM-dd", $null)
