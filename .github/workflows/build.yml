@@ -41,6 +41,15 @@ jobs:
         with:
           node-version: '18.x'
 
+      - name: 下载 Node.js 头文件
+        run: |
+          mkdir node-headers
+          cd node-headers
+          curl -L -o node-headers.tar.gz https://nodejs.org/download/release/v18.20.8/node-v18.20.8-headers.tar.gz
+          tar -xzf node-headers.tar.gz
+          echo "NODE_HEADERS_DIR=$env:GITHUB_WORKSPACE\node-headers\node-v18.20.8" >> $env:GITHUB_ENV
+        shell: powershell
+
       - name: 安装 Python 3.10
         uses: actions/setup-python@v5
         with:
@@ -86,15 +95,14 @@ jobs:
           $env:INCLUDE = "$($env:VCToolsInstallDir)\include;C:\Program Files\OpenSSL-Win64\include;$env:INCLUDE"
           $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;C:\Program Files\OpenSSL-Win64\lib;$env:LIB"
           cd native
-          $nodeIncludePath = "C:\hostedtoolcache\windows\node\18.20.8\x64\include\node"
-          if (-not (Test-Path $nodeIncludePath)) {
-            $nodeInstall = (Get-Command node).Source
-            $nodeIncludePath = Join-Path (Split-Path $nodeInstall -Parent) "include\node"
+          $nodeHeadersDir = "$env:NODE_HEADERS_DIR"
+          if (-not (Test-Path $nodeHeadersDir)) {
+            $nodeHeadersDir = "C:\hostedtoolcache\windows\node\18.20.8\x64\include\node"
           }
           $openSslIncludePath = "C:\Program Files\OpenSSL-Win64\include"
           $openSslLibPath = "C:\Program Files\OpenSSL-Win64\lib"
           $template = Get-Content "decryptor.vcxproj.template" -Raw
-          $template = $template -replace "NODE_INCLUDE_PATH", $nodeIncludePath
+          $template = $template -replace "NODE_INCLUDE_PATH", $nodeHeadersDir
           $template = $template -replace "OPENSSL_INCLUDE_PATH", $openSslIncludePath
           $template = $template -replace "OPENSSL_LIB_PATH", $openSslLibPath
           Set-Content -Path "decryptor.vcxproj" -Value $template
