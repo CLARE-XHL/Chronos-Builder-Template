@@ -86,10 +86,10 @@ jobs:
           $env:INCLUDE = "$($env:VCToolsInstallDir)\include;C:\Program Files\OpenSSL-Win64\include;$env:INCLUDE"
           $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;C:\Program Files\OpenSSL-Win64\lib;$env:LIB"
           cd native
-          $nodeIncludePath = "C:\hostedtoolcache\windows\node\18.20.8\x64\include"
+          $nodeIncludePath = "C:\hostedtoolcache\windows\node\18.20.8\x64\include\node"
           if (-not (Test-Path $nodeIncludePath)) {
             $nodeInstall = (Get-Command node).Source
-            $nodeIncludePath = Join-Path (Split-Path $nodeInstall -Parent) "include"
+            $nodeIncludePath = Join-Path (Split-Path $nodeInstall -Parent) "include\node"
           }
           $openSslIncludePath = "C:\Program Files\OpenSSL-Win64\include"
           $openSslLibPath = "C:\Program Files\OpenSSL-Win64\lib"
