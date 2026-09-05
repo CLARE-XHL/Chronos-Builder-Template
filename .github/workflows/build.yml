@@ -28,9 +28,6 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      # ============================================================
-      # 1. 读取 system.json 获取游戏名称
-      # ============================================================
       - name: 读取 system.json
         id: read_system
         run: |
@@ -40,7 +37,6 @@ jobs:
             if ([string]::IsNullOrEmpty($gameTitle)) {
               $gameTitle = "${{ github.event.inputs.game_name }}"
             }
-            # 直接输出，不转义（游戏名不含双引号时最安全）
             "game_title=$gameTitle" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
             Write-Host "✅ system.json 读取成功: $gameTitle"
           } else {
@@ -49,9 +45,6 @@ jobs:
           }
         shell: powershell
 
-      # ============================================================
-      # 2. 安装 OpenSSL（vcpkg 方式）
-      # ============================================================
       - name: 安装 OpenSSL
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
@@ -62,9 +55,6 @@ jobs:
           echo "INCLUDE=$env:INCLUDE;$env:GITHUB_WORKSPACE\vcpkg\installed\x64-windows\include" >> $env:GITHUB_ENV
         shell: powershell
 
-      # ============================================================
-      # 3. 安装 Node.js 14.x（匹配 NW.js 0.48 的 ABI）
-      # ============================================================
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
@@ -72,10 +62,8 @@ jobs:
 
       - name: 安装 node-gyp
         run: npm install -g node-gyp
+        shell: powershell
 
-      # ============================================================
-      # 4. 生成随机派生种子
-      # ============================================================
       - name: 生成派生种子
         id: gen
         run: |
@@ -83,9 +71,6 @@ jobs:
           echo "seed=$seed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
         shell: powershell
 
-      # ============================================================
-      # 5. 解析截止日期（修复：留空时为 2147483647）
-      # ============================================================
       - name: 解析截止日期
         id: expire
         run: |
@@ -98,9 +83,6 @@ jobs:
           }
         shell: powershell
 
-      # ============================================================
-      # 6. 编译 decryptor.node
-      # ============================================================
       - name: 编译 decryptor.node
         run: |
           cd native
@@ -114,9 +96,6 @@ jobs:
             -DWATCHDOG_MAX_MISS=2
         shell: powershell
 
-      # ============================================================
-      # 7. 生成 encrypt_config.json
-      # ============================================================
       - name: 生成加密配置
         run: |
           $config = @{
@@ -130,9 +109,6 @@ jobs:
           [System.IO.File]::WriteAllText("encrypt_config.json", $json, $utf8NoBom)
         shell: powershell
 
-      # ============================================================
-      # 8. 生成 author_secret.txt
-      # ============================================================
       - name: 生成作者密钥
         run: |
           $content = @"
@@ -153,9 +129,6 @@ jobs:
           [System.IO.File]::WriteAllText("author_secret.txt", $content, $utf8NoBom)
         shell: powershell
 
-      # ============================================================
-      # 9. 校验产物
-      # ============================================================
       - name: 校验产物
         id: verify
         run: |
@@ -174,9 +147,6 @@ jobs:
           Write-Output "✅ 所有产物生成成功"
         shell: powershell
 
-      # ============================================================
-      # 10. 上传产物
-      # ============================================================
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
