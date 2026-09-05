@@ -31,7 +31,7 @@
         },
         "VCLinkerTool": {
           "LinkTimeCodeGeneration": 1,
-          "GenerateDebugInformation": false
+          "GenerateDebugInformation": 0
         }
       }
     }
