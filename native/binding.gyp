@@ -24,9 +24,9 @@
           "ExceptionHandling": 0,
           "Optimization": 2,
           "FavorSizeOrSpeed": 1,
-          "OmitFramePointers": true,
-          "EnableFunctionLevelLinking": true,
-          "EnableIntrinsicFunctions": true,
+          "OmitFramePointers": 1,
+          "EnableFunctionLevelLinking": 1,
+          "EnableIntrinsicFunctions": 1,
           "AdditionalOptions": ["/GL"]
         },
         "VCLinkerTool": {
