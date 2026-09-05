@@ -656,74 +656,298 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 纯 C N-API 模块注册（参考 V1.3 风格，能过 MSVC）
+// 纯 C N-API 模块注册（完全避免 Napi::CallbackInfo 构造）
 // ============================================================
 
-// 每个导出函数的纯 C 包装器
-static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
-    Napi::CallbackInfo cinfo(env, info);
-    Napi::Object result = Initialize(cinfo);
-    return result.Value();
+// 内部函数声明（纯 C N-API 风格）
+static napi_value c_Initialize(napi_env env, napi_callback_info info) {
+    // 构造一个假的 CallbackInfo？不，直接使用纯 C N-API
+    // 但为了复用现有 C++ 逻辑，我们构造一个 CallbackInfo 的替代品
+    // 这里使用 Napi::CallbackInfo 的构造函数会触发 C7624
+    // 所以改为：手动构造参数列表，然后调用一个纯 C 风格的实现
+    
+    // 最稳妥的办法：把 Initialize 的逻辑复制到这里，用纯 C N-API 实现
+    // 但为了减少改动，我们用一个技巧：
+    // 创建 Napi::Env，然后手动构造参数
+    // 但 Napi::CallbackInfo 的构造函数会触发 C7624
+    
+    // 最终决定：重写 Initialize 的纯 C 版本
+    // 但为了尽快搞定，我建议这里直接调用 Initialize 内部逻辑
+    // 改用纯 C N-API 实现，避免使用 Napi::CallbackInfo
+    
+    // 由于时间关系，我直接提供一个纯 C 版本的 Initialize
+    // 实际上就是把 Initialize 函数的逻辑改成纯 C N-API
+    
+    // 先获取参数
+    size_t argc = 0;
+    napi_value* argv = nullptr;
+    napi_get_cb_info(env, info, &argc, nullptr, nullptr, nullptr);
+    
+    // 调用内部实现（这里需要改造，暂时先跳过）
+    // 由于改动复杂，我们保留原有逻辑，只在 Wrap 层做文章
+    // 真正的解决：把 Initialize 改成纯 C 风格
+    
+    // 这里我直接返回一个空对象，下面会给出完整实现
+    napi_value result;
+    napi_create_object(env, &result);
+    return result;
 }
 
-static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
-    Napi::CallbackInfo cinfo(env, info);
-    Napi::Object result = DecryptAsset(cinfo);
-    return result.Value();
+// 但实际上，更好的办法是将所有导出函数改成纯 C 风格
+// 下面给出完整实现
+static napi_value c_Initialize(napi_env env, napi_callback_info info) {
+    // 初始化 OpenSSL
+    init_openssl();
+    
+    {
+        std::lock_guard<std::mutex> lock(g_time_mutex);
+        if (!g_time_initialized) {
+            g_start_steady = std::chrono::steady_clock::now();
+            g_start_system_time = time(nullptr);
+            g_time_initialized = true;
+        }
+    }
+    
+    time_t now = time(nullptr);
+    napi_value result;
+    napi_create_object(env, &result);
+    
+    if (now > HARD_EXPIRE) {
+        napi_value success, errorCode, timeTamperDetected;
+        napi_get_boolean(env, false, &success);
+        napi_create_int32(env, ERR_EXPIRED, &errorCode);
+        napi_get_boolean(env, false, &timeTamperDetected);
+        napi_set_named_property(env, result, "success", success);
+        napi_set_named_property(env, result, "errorCode", errorCode);
+        napi_set_named_property(env, result, "timeTamperDetected", timeTamperDetected);
+        return result;
+    }
+    
+    bool time_tamper_detected = false;
+    {
+        std::lock_guard<std::mutex> lock(g_time_mutex);
+        if (g_time_initialized) {
+            auto elapsed = std::chrono::steady_clock::now() - g_start_steady;
+            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            time_t expected_now = g_start_system_time + elapsed_seconds;
+            if (now < expected_now - 5) {
+                time_tamper_detected = true;
+                write_watchdog_log("Time tamper detected: system time jumped backward");
+            }
+        }
+    }
+    
+    napi_value success, errorCode, timeTamperDetected;
+    napi_get_boolean(env, true, &success);
+    napi_create_int32(env, SUCCESS, &errorCode);
+    napi_get_boolean(env, time_tamper_detected, &timeTamperDetected);
+    napi_set_named_property(env, result, "success", success);
+    napi_set_named_property(env, result, "errorCode", errorCode);
+    napi_set_named_property(env, result, "timeTamperDetected", timeTamperDetected);
+    
+    return result;
 }
 
-static napi_value WrapStartWatchdog(napi_env env, napi_callback_info info) {
-    Napi::CallbackInfo cinfo(env, info);
-    StartWatchdog(cinfo);
+static napi_value c_DecryptAsset(napi_env env, napi_callback_info info) {
+    size_t argc = 1;
+    napi_value argv[1];
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    
+    napi_value result;
+    napi_create_object(env, &result);
+    
+    // 检查参数是否是 Buffer
+    bool is_buffer = false;
+    napi_is_buffer(env, argv[0], &is_buffer);
+    if (argc < 1 || !is_buffer) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    // 获取 Buffer 数据
+    void* buffer_data = nullptr;
+    size_t data_size = 0;
+    napi_get_buffer_info(env, argv[0], &buffer_data, &data_size);
+    
+    if (data_size < ASSET_HEADER_LEN) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    if (data_size > MAX_ASSET_SIZE) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_ASSET_TOO_LARGE, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(buffer_data);
+    
+    // 验证魔数
+    if (!constant_time_equals(data, MAGIC_BYTES, MAGIC_LEN)) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    std::string iv(reinterpret_cast<const char*>(data + MAGIC_LEN), IV_LEN);
+    std::string stored_hmac(reinterpret_cast<const char*>(data + MAGIC_LEN + IV_LEN), HMAC_LEN);
+    std::string ciphertext(
+        reinterpret_cast<const char*>(data + ASSET_HEADER_LEN),
+        data_size - ASSET_HEADER_LEN);
+    
+    std::string aes_key = derive_aes_key();
+    std::string hmac_key = derive_hmac_key();
+    
+    if (aes_key.empty() || hmac_key.empty()) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_UNKNOWN, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    std::string computed_hmac = hmac_sha256(ciphertext, hmac_key);
+    if (computed_hmac.size() != HMAC_LEN ||
+        !constant_time_equals(
+            reinterpret_cast<const uint8_t*>(computed_hmac.data()),
+            reinterpret_cast<const uint8_t*>(stored_hmac.data()),
+            HMAC_LEN)) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_DECRYPT_HMAC, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    DecryptResult dec = aes_decrypt(ciphertext,
+        reinterpret_cast<const unsigned char*>(aes_key.c_str()), iv);
+    
+    if (!dec.ok) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, dec.errCode, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+    
+    napi_value ok, errCode, data;
+    napi_get_boolean(env, true, &ok);
+    napi_create_int32(env, SUCCESS, &errCode);
+    napi_create_buffer_copy(env, dec.data.size(), dec.data.c_str(), nullptr, &data);
+    napi_set_named_property(env, result, "ok", ok);
+    napi_set_named_property(env, result, "errCode", errCode);
+    napi_set_named_property(env, result, "data", data);
+    
+    return result;
+}
+
+static napi_value c_StartWatchdog(napi_env env, napi_callback_info info) {
+    std::lock_guard<std::mutex> lock(g_watchdog.mutex);
+    if (!g_watchdog.started.load()) {
+        g_watchdog.watchdog_exit.store(false);
+        g_watchdog.heartbeat_received.store(true);
+        g_watchdog.missed_heartbeats.store(0);
+        g_watchdog.triggered.store(false);
+        g_watchdog.thread = std::thread(watchdog_thread_func);
+        g_watchdog.thread.detach();
+        g_watchdog.started.store(true);
+        write_watchdog_log("Watchdog started.");
+    }
     return nullptr;
 }
 
-static napi_value WrapStopWatchdog(napi_env env, napi_callback_info info) {
-    Napi::CallbackInfo cinfo(env, info);
-    StopWatchdog(cinfo);
+static napi_value c_StopWatchdog(napi_env env, napi_callback_info info) {
+    g_watchdog.watchdog_exit.store(true);
+    g_watchdog.started.store(false);
+    write_watchdog_log("Watchdog stop signal sent.");
     return nullptr;
 }
 
-static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
-    Napi::CallbackInfo cinfo(env, info);
-    HeartbeatReply(cinfo);
+static napi_value c_HeartbeatReply(napi_env env, napi_callback_info info) {
+    g_watchdog.heartbeat_received.store(true);
+    g_watchdog.missed_heartbeats.store(0);
+    if (g_watchdog.triggered.load()) {
+        g_watchdog.triggered.store(false);
+        write_watchdog_log("Watchdog alert reset by heartbeat.");
+    }
     return nullptr;
 }
 
-static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
-    Napi::CallbackInfo cinfo(env, info);
-    Napi::Object result = GetWatchdogState(cinfo);
-    return result.Value();
+static napi_value c_GetWatchdogState(napi_env env, napi_callback_info info) {
+    napi_value result;
+    napi_create_object(env, &result);
+    
+    napi_value triggered, missedHeartbeats, started;
+    napi_get_boolean(env, g_watchdog.triggered.load(), &triggered);
+    napi_create_int32(env, g_watchdog.missed_heartbeats.load(), &missedHeartbeats);
+    napi_get_boolean(env, g_watchdog.started.load(), &started);
+    
+    napi_set_named_property(env, result, "triggered", triggered);
+    napi_set_named_property(env, result, "missedHeartbeats", missedHeartbeats);
+    napi_set_named_property(env, result, "started", started);
+    
+    return result;
 }
 
-// Init 函数（纯 C N-API）
+// 模块初始化（纯 C N-API）
 static napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
-
+    
     napi_create_function(env, "initialize", NAPI_AUTO_LENGTH,
-                         WrapInitialize, nullptr, &fn);
+                         c_Initialize, nullptr, &fn);
     napi_set_named_property(env, exports, "initialize", fn);
-
+    
     napi_create_function(env, "decryptAsset", NAPI_AUTO_LENGTH,
-                         WrapDecryptAsset, nullptr, &fn);
+                         c_DecryptAsset, nullptr, &fn);
     napi_set_named_property(env, exports, "decryptAsset", fn);
-
+    
     napi_create_function(env, "startWatchdog", NAPI_AUTO_LENGTH,
-                         WrapStartWatchdog, nullptr, &fn);
+                         c_StartWatchdog, nullptr, &fn);
     napi_set_named_property(env, exports, "startWatchdog", fn);
-
+    
     napi_create_function(env, "stopWatchdog", NAPI_AUTO_LENGTH,
-                         WrapStopWatchdog, nullptr, &fn);
+                         c_StopWatchdog, nullptr, &fn);
     napi_set_named_property(env, exports, "stopWatchdog", fn);
-
+    
     napi_create_function(env, "heartbeatReply", NAPI_AUTO_LENGTH,
-                         WrapHeartbeatReply, nullptr, &fn);
+                         c_HeartbeatReply, nullptr, &fn);
     napi_set_named_property(env, exports, "heartbeatReply", fn);
-
+    
     napi_create_function(env, "getWatchdogState", NAPI_AUTO_LENGTH,
-                         WrapGetWatchdogState, nullptr, &fn);
+                         c_GetWatchdogState, nullptr, &fn);
     napi_set_named_property(env, exports, "getWatchdogState", fn);
-
+    
     return exports;
 }
 
