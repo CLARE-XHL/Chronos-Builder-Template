@@ -68,8 +68,8 @@ jobs:
 
       - name: 编译 decryptor.node
         run: |
-          # 使用 vswhere 定位 Visual Studio 2022
-          $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version [17.0,18.0) -property installationPath
+          # 使用 vswhere 定位 Visual Studio 2022（注意版本号要用引号括起来）
+          $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
           if ($vspath) {
             Write-Host "✅ 找到 Visual Studio 2022 路径: $vspath"
             $env:VCINSTALLDIR = "$vspath\VC"
