@@ -43,6 +43,12 @@ jobs:
         with:
           node-version: '18.x'
 
+      # 关键：降级 Python 到 3.10，因为 node-gyp 依赖 distutils（Python 3.12 已移除）
+      - name: 安装 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
       - name: 安装 node-gyp（稳定版）
         run: npm install -g node-gyp@9.4.0
         shell: powershell
@@ -68,13 +74,12 @@ jobs:
 
       - name: 编译 decryptor.node
         run: |
-          # 使用 vswhere 定位 Visual Studio 2022（注意版本号要用引号括起来）
+          # 使用 vswhere 定位 Visual Studio 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
           if ($vspath) {
             Write-Host "✅ 找到 Visual Studio 2022 路径: $vspath"
             $env:VCINSTALLDIR = "$vspath\VC"
             $env:VSINSTALLDIR = $vspath
-            # 将 MSVC 工具链加入 PATH
             $msvcPath = Get-ChildItem "$vspath\VC\Tools\MSVC" -Directory | Sort-Object Name -Descending | Select-Object -First 1
             if ($msvcPath) {
               $env:PATH = "$($msvcPath.FullName)\bin\HostX64\x64;$env:PATH"
