@@ -72,7 +72,7 @@ jobs:
           }
         shell: powershell
 
-      - name: 编译 decryptor.node
+      - name: 编译 decryptor.node（手动 MSBuild）
         run: |
           # 使用 vswhere 定位 Visual Studio 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
@@ -94,21 +94,26 @@ jobs:
 
           cd native
 
-          # 安装 node-addon-api（binding.gyp 依赖它）
+          # 安装 node-addon-api
           npm install node-addon-api
 
           # 生成 Visual Studio 项目文件
           node-gyp configure --msvs_version=2022
 
-          # 编译，通过 -- 显式传递库路径给链接器
-          node-gyp build --release --msvs_version=2022 `
-            -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
-            -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
-            -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
-            -DHARD_EXPIRE="${{ steps.expire.outputs.timestamp }}" `
-            -DWATCHDOG_TIMEOUT_SEC=10 `
-            -DWATCHDOG_MAX_MISS=2 `
-            -- -L"$($env:VCPKG_ROOT)\installed\x64-windows\lib"
+          # 查找 MSBuild
+          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
+          if (-not $msbuild) {
+            Write-Error "MSBuild not found"
+            exit 1
+          }
+          Write-Host "Using MSBuild at: $msbuild"
+
+          # 获取 OpenSSL 库路径
+          $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
+          Write-Host "OpenSSL lib path: $openSslLibPath"
+
+          # 手动 MSBuild 编译，显式传递库路径
+          & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="$openSslLibPath" /p:AdditionalLibraryDirectories="$openSslLibPath" /m
         shell: powershell
 
       - name: 生成加密配置
@@ -147,7 +152,7 @@ jobs:
       - name: 校验产物
         id: verify
         run: |
-          if (-not (Test-Path "native\build\Release\decryptor.node")) {
+          if (-not (Test-Path "build\Release\decryptor.node")) {
             Write-Error "decryptor.node not found"
             exit 1
           }
@@ -167,6 +172,6 @@ jobs:
         with:
           name: chronos-seal-output
           path: |
-            native\build\Release\decryptor.node
+            build\Release\decryptor.node
             encrypt_config.json
             author_secret.txt
