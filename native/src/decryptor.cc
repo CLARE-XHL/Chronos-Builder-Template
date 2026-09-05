@@ -455,12 +455,88 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
 
 
 // ============================================================
-// 纯 C N-API 风格导出函数
+// 看门狗守护线程
+// ============================================================
+
+// 看门狗线程函数（定义在 start_watchdog_internal 之前）
+void watchdog_thread_func() {
+    while (!g_watchdog.watchdog_exit.load()) {
+        std::this_thread::sleep_for(std::chrono::seconds(WATCHDOG_TIMEOUT_SEC));
+
+        if (g_watchdog.watchdog_exit.load()) break;
+
+        if (!g_watchdog.heartbeat_received.load()) {
+            g_watchdog.missed_heartbeats.fetch_add(1);
+            int misses = g_watchdog.missed_heartbeats.load();
+            write_watchdog_log("Missed heartbeat #" + std::to_string(misses));
+            if (misses >= WATCHDOG_MAX_MISS) {
+                write_watchdog_log("Watchdog triggered! Sending alert flag.");
+                g_watchdog.triggered.store(true);
+            }
+        } else {
+            g_watchdog.missed_heartbeats.store(0);
+            g_watchdog.heartbeat_received.store(false);
+            write_watchdog_log("Heartbeat received, resetting counter.");
+        }
+    }
+    write_watchdog_log("Watchdog thread exiting normally.");
+}
+
+static void start_watchdog_internal() {
+    std::lock_guard<std::mutex> lock(g_watchdog.mutex);
+    if (!g_watchdog.started.load()) {
+        g_watchdog.watchdog_exit.store(false);
+        g_watchdog.heartbeat_received.store(true);
+        g_watchdog.missed_heartbeats.store(0);
+        g_watchdog.triggered.store(false);
+        g_watchdog.thread = std::thread(watchdog_thread_func);
+        g_watchdog.thread.detach();
+        g_watchdog.started.store(true);
+        write_watchdog_log("Watchdog started.");
+    }
+}
+
+static void stop_watchdog_internal() {
+    g_watchdog.watchdog_exit.store(true);
+    g_watchdog.started.store(false);
+    write_watchdog_log("Watchdog stop signal sent.");
+}
+
+static void heartbeat_reply_internal() {
+    g_watchdog.heartbeat_received.store(true);
+    g_watchdog.missed_heartbeats.store(0);
+    if (g_watchdog.triggered.load()) {
+        g_watchdog.triggered.store(false);
+        write_watchdog_log("Watchdog alert reset by heartbeat.");
+    }
+}
+
+static napi_value get_watchdog_state_internal(napi_env env) {
+    napi_value result;
+    napi_create_object(env, &result);
+
+    napi_value triggered, missedHeartbeats, started;
+    napi_get_boolean(env, g_watchdog.triggered.load(), &triggered);
+    napi_create_int32(env, g_watchdog.missed_heartbeats.load(), &missedHeartbeats);
+    napi_get_boolean(env, g_watchdog.started.load(), &started);
+
+    napi_set_named_property(env, result, "triggered", triggered);
+    napi_set_named_property(env, result, "missedHeartbeats", missedHeartbeats);
+    napi_set_named_property(env, result, "started", started);
+
+    return result;
+}
+
+
+// ============================================================
+// 纯 C N-API 导出函数（避免 Napi::CallbackInfo）
 // ============================================================
 
 static napi_value c_Initialize(napi_env env, napi_callback_info info) {
+    // 初始化 OpenSSL
     init_openssl();
 
+    // 初始化时钟
     {
         std::lock_guard<std::mutex> lock(g_time_mutex);
         if (!g_time_initialized) {
@@ -474,6 +550,7 @@ static napi_value c_Initialize(napi_env env, napi_callback_info info) {
     napi_value result;
     napi_create_object(env, &result);
 
+    // 检查硬过期
     if (now > HARD_EXPIRE) {
         napi_value success, errorCode, timeTamperDetected;
         napi_get_boolean(env, false, &success);
@@ -485,6 +562,7 @@ static napi_value c_Initialize(napi_env env, napi_callback_info info) {
         return result;
     }
 
+    // 检测时间回拨
     bool time_tamper_detected = false;
     {
         std::lock_guard<std::mutex> lock(g_time_mutex);
@@ -518,10 +596,21 @@ static napi_value c_DecryptAsset(napi_env env, napi_callback_info info) {
     napi_value result;
     napi_create_object(env, &result);
 
-    // 检查参数是否是 Buffer
+    // 检查参数
+    if (argc < 1) {
+        napi_value ok, errCode, data;
+        napi_get_boolean(env, false, &ok);
+        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
+        napi_create_buffer(env, 0, nullptr, &data);
+        napi_set_named_property(env, result, "ok", ok);
+        napi_set_named_property(env, result, "errCode", errCode);
+        napi_set_named_property(env, result, "data", data);
+        return result;
+    }
+
     bool is_buffer = false;
     napi_is_buffer(env, argv[0], &is_buffer);
-    if (argc < 1 || !is_buffer) {
+    if (!is_buffer) {
         napi_value ok, errCode, data;
         napi_get_boolean(env, false, &ok);
         napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
@@ -559,10 +648,10 @@ static napi_value c_DecryptAsset(napi_env env, napi_callback_info info) {
         return result;
     }
 
-    const uint8_t* data = reinterpret_cast<const uint8_t*>(buffer_data);
+    const uint8_t* input_data = reinterpret_cast<const uint8_t*>(buffer_data);
 
     // 验证魔数
-    if (!constant_time_equals(data, MAGIC_BYTES, MAGIC_LEN)) {
+    if (!constant_time_equals(input_data, MAGIC_BYTES, MAGIC_LEN)) {
         napi_value ok, errCode, data;
         napi_get_boolean(env, false, &ok);
         napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
@@ -573,10 +662,10 @@ static napi_value c_DecryptAsset(napi_env env, napi_callback_info info) {
         return result;
     }
 
-    std::string iv(reinterpret_cast<const char*>(data + MAGIC_LEN), IV_LEN);
-    std::string stored_hmac(reinterpret_cast<const char*>(data + MAGIC_LEN + IV_LEN), HMAC_LEN);
+    std::string iv(reinterpret_cast<const char*>(input_data + MAGIC_LEN), IV_LEN);
+    std::string stored_hmac(reinterpret_cast<const char*>(input_data + MAGIC_LEN + IV_LEN), HMAC_LEN);
     std::string ciphertext(
-        reinterpret_cast<const char*>(data + ASSET_HEADER_LEN),
+        reinterpret_cast<const char*>(input_data + ASSET_HEADER_LEN),
         data_size - ASSET_HEADER_LEN);
 
     std::string aes_key = derive_aes_key();
@@ -623,67 +712,41 @@ static napi_value c_DecryptAsset(napi_env env, napi_callback_info info) {
         return result;
     }
 
-    napi_value ok, errCode, out_data;
+    napi_value ok, errCode, outData;
     napi_get_boolean(env, true, &ok);
     napi_create_int32(env, SUCCESS, &errCode);
-    // 使用 napi_create_buffer_copy，最后一个参数是 napi_value*
-    napi_create_buffer_copy(env, dec.data.size(), dec.data.c_str(), nullptr, &out_data);
+    napi_create_buffer_copy(env, dec.data.size(), dec.data.c_str(), nullptr, &outData);
     napi_set_named_property(env, result, "ok", ok);
     napi_set_named_property(env, result, "errCode", errCode);
-    napi_set_named_property(env, result, "data", out_data);
+    napi_set_named_property(env, result, "data", outData);
 
     return result;
 }
 
 static napi_value c_StartWatchdog(napi_env env, napi_callback_info info) {
-    std::lock_guard<std::mutex> lock(g_watchdog.mutex);
-    if (!g_watchdog.started.load()) {
-        g_watchdog.watchdog_exit.store(false);
-        g_watchdog.heartbeat_received.store(true);
-        g_watchdog.missed_heartbeats.store(0);
-        g_watchdog.triggered.store(false);
-        g_watchdog.thread = std::thread(watchdog_thread_func);
-        g_watchdog.thread.detach();
-        g_watchdog.started.store(true);
-        write_watchdog_log("Watchdog started.");
-    }
+    start_watchdog_internal();
     return nullptr;
 }
 
 static napi_value c_StopWatchdog(napi_env env, napi_callback_info info) {
-    g_watchdog.watchdog_exit.store(true);
-    g_watchdog.started.store(false);
-    write_watchdog_log("Watchdog stop signal sent.");
+    stop_watchdog_internal();
     return nullptr;
 }
 
 static napi_value c_HeartbeatReply(napi_env env, napi_callback_info info) {
-    g_watchdog.heartbeat_received.store(true);
-    g_watchdog.missed_heartbeats.store(0);
-    if (g_watchdog.triggered.load()) {
-        g_watchdog.triggered.store(false);
-        write_watchdog_log("Watchdog alert reset by heartbeat.");
-    }
+    heartbeat_reply_internal();
     return nullptr;
 }
 
 static napi_value c_GetWatchdogState(napi_env env, napi_callback_info info) {
-    napi_value result;
-    napi_create_object(env, &result);
-
-    napi_value triggered, missedHeartbeats, started;
-    napi_get_boolean(env, g_watchdog.triggered.load(), &triggered);
-    napi_create_int32(env, g_watchdog.missed_heartbeats.load(), &missedHeartbeats);
-    napi_get_boolean(env, g_watchdog.started.load(), &started);
-
-    napi_set_named_property(env, result, "triggered", triggered);
-    napi_set_named_property(env, result, "missedHeartbeats", missedHeartbeats);
-    napi_set_named_property(env, result, "started", started);
-
-    return result;
+    return get_watchdog_state_internal(env);
 }
 
-// 模块初始化（纯 C N-API）
+
+// ============================================================
+// Node-API 模块注册
+// ============================================================
+
 static napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
 
