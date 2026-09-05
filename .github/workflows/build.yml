@@ -125,7 +125,7 @@ jobs:
           $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
           Write-Host "OpenSSL lib path: $openSslLibPath"
 
-          & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="$openSslLibPath" /p:AdditionalLibraryDirectories="$openSslLibPath" /m
+          & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="$openSslLibPath" /p:AdditionalDependencies="ssl.lib;crypto.lib" /m
         shell: powershell
 
       - name: 生成加密配置
