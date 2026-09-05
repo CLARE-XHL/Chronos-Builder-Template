@@ -46,12 +46,8 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装 node-gyp
-        run: npm install -g node-gyp@9.4.0
-        shell: powershell
-
-      - name: 安装 node-addon-api
-        run: npm install node-addon-api
+      - name: 安装 node-addon-api 和 cmake-js
+        run: npm install node-addon-api cmake-js
         shell: powershell
         working-directory: native
 
@@ -74,25 +70,23 @@ jobs:
           }
         shell: powershell
 
-      - name: 编译 decryptor.node
+      - name: 编译 decryptor.node（CMake.js）
         run: |
-          $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
-          if (-not $vspath) {
-            Write-Error "Visual Studio 2022 not found"
-            exit 1
-          }
-          $env:VCINSTALLDIR = "$vspath\VC"
-          $env:VSINSTALLDIR = "$vspath"
-          $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
-          $env:VSCMD_ARG_TGT_ARCH = "x64"
-          $env:VSCMD_ARG_HOST_ARCH = "x64"
-          $env:PATH += ";$($env:VCToolsInstallDir)\bin\HostX64\x64"
-          $env:INCLUDE = "$($env:VCToolsInstallDir)\include;C:\Program Files\OpenSSL-Win64\include;$env:INCLUDE"
-          $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;C:\Program Files\OpenSSL-Win64\lib;$env:LIB"
           cd native
-          npm install node-addon-api
-          node-gyp configure --msvs_version=2022
-          node-gyp build --release --msvs_version=2022
+          # 设置 OpenSSL 路径
+          $env:OPENSSL_ROOT_DIR = "C:\Program Files\OpenSSL-Win64"
+          $env:OPENSSL_LIBRARIES = "C:\Program Files\OpenSSL-Win64\lib"
+          $env:OPENSSL_INCLUDE_DIR = "C:\Program Files\OpenSSL-Win64\include"
+          # 编译
+          npx cmake-js compile -T decryptor -B Release -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64"
+          # 复制产物到根目录
+          if (Test-Path "build\Release\decryptor.node") {
+            Copy-Item "build\Release\decryptor.node" "..\decryptor.node" -Force
+          } elseif (Test-Path "build\Release\decryptor") {
+            Copy-Item "build\Release\decryptor" "..\decryptor.node" -Force
+          } elseif (Test-Path "Release\decryptor.node") {
+            Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
+          }
         shell: powershell
 
       - name: 生成加密配置
@@ -131,7 +125,7 @@ jobs:
       - name: 校验产物
         id: verify
         run: |
-          if (-not (Test-Path "native\build\Release\decryptor.node")) {
+          if (-not (Test-Path "decryptor.node")) {
             Write-Error "decryptor.node not found"
             exit 1
           }
@@ -151,6 +145,6 @@ jobs:
         with:
           name: chronos-seal-output
           path: |
-            native\build\Release\decryptor.node
+            decryptor.node
             encrypt_config.json
             author_secret.txt
