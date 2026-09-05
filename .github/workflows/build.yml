@@ -28,29 +28,14 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 缓存 vcpkg
-        id: cache-vcpkg
-        uses: actions/cache@v4
-        with:
-          path: vcpkg
-          key: vcpkg-windows-${{ runner.os }}-20260905
-          restore-keys: |
-            vcpkg-windows-${{ runner.os }}-
-
-      - name: 安装 OpenSSL
-        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
+      - name: 安装 OpenSSL（Chocolatey 预编译版）
         run: |
-          git clone https://github.com/Microsoft/vcpkg.git
-          .\vcpkg\bootstrap-vcpkg.bat
-          .\vcpkg\vcpkg install openssl:x64-windows
-        shell: powershell
-
-      - name: 设置 OpenSSL 环境
-        run: |
-          $vcpkgRoot = (Get-Item .\vcpkg).FullName
-          echo "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
-          echo "LIB=$env:LIB;$vcpkgRoot\installed\x64-windows\lib" >> $env:GITHUB_ENV
-          echo "INCLUDE=$env:INCLUDE;$vcpkgRoot\installed\x64-windows\include" >> $env:GITHUB_ENV
+          choco install openssl -y
+          echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
+          echo "OPENSSL_LIBRARIES=C:\Program Files\OpenSSL-Win64\lib" >> $env:GITHUB_ENV
+          echo "OPENSSL_INCLUDE_DIR=C:\Program Files\OpenSSL-Win64\include" >> $env:GITHUB_ENV
+          echo "LIB=$env:LIB;C:\Program Files\OpenSSL-Win64\lib" >> $env:GITHUB_ENV
+          echo "INCLUDE=$env:INCLUDE;C:\Program Files\OpenSSL-Win64\include" >> $env:GITHUB_ENV
         shell: powershell
 
       - name: 安装 Node.js
@@ -95,33 +80,23 @@ jobs:
           }
 
           $env:VCINSTALLDIR = "$vspath\VC"
-          $env:VSINSTALLDIR = $vspath
+          $env:VSINSTALLDIR = "$vspath"
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
           $env:VSCMD_ARG_TGT_ARCH = "x64"
           $env:VSCMD_ARG_HOST_ARCH = "x64"
           $env:PATH += ";$($env:VCToolsInstallDir)\bin\HostX64\x64"
-          $env:INCLUDE = "$($env:VCToolsInstallDir)\include;$env:INCLUDE"
-          $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;$env:LIB"
+          $env:INCLUDE = "$($env:VCToolsInstallDir)\include;C:\Program Files\OpenSSL-Win64\include;$env:INCLUDE"
+          $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;C:\Program Files\OpenSSL-Win64\lib;$env:LIB"
 
           cd native
+
           npm install node-addon-api
+
+          # 直接使用 binding.gyp 中的 -llibssl 和 -llibcrypto
+          # 不需要动态生成，因为库路径已通过环境变量传递
+
           node-gyp configure --msvs_version=2022
-
-          $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
-          Write-Host "OpenSSL lib path: $openSslLibPath"
-
-          $vcxprojPath = "build\decryptor.vcxproj"
-          $content = Get-Content $vcxprojPath -Raw
-          $newContent = $content -replace '(<Link>.*?)</Link>', ('$1<AdditionalLibraryDirectories>' + $openSslLibPath + '</AdditionalLibraryDirectories></Link>')
-          Set-Content $vcxprojPath $newContent
-
-          $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
-          if (-not $msbuild) {
-            Write-Error "MSBuild not found"
-            exit 1
-          }
-
-          & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
+          node-gyp build --release --msvs_version=2022
         shell: powershell
 
       - name: 生成加密配置
@@ -160,8 +135,9 @@ jobs:
       - name: 校验产物
         id: verify
         run: |
-          if (-not (Test-Path "build\Release\decryptor.node")) {
-            Write-Error "decryptor.node not found"
+          $nodePath = "native\build\Release\decryptor.node"
+          if (-not (Test-Path $nodePath)) {
+            Write-Error "decryptor.node not found at: $nodePath"
             exit 1
           }
           if (-not (Test-Path "encrypt_config.json")) {
@@ -180,6 +156,6 @@ jobs:
         with:
           name: chronos-seal-output
           path: |
-            build\Release\decryptor.node
+            native\build\Release\decryptor.node
             encrypt_config.json
             author_secret.txt
