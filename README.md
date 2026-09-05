@@ -12,19 +12,16 @@
 
 **1. Fork 本仓库（必须设为私有）**
 
-**2. 上传 `system.json`**
-将游戏工程中的 `data/system.json`（明文）上传到仓库根目录。
-
-**3. 触发 Actions**
+**2. 触发 Actions**
 Actions → Build Chronos Seal → Run workflow → 填写参数（游戏名称、版本号、截止日期）
 
-**4. 下载产物**
+**3. 下载产物**
 编译完成后下载 `chronos-seal-output.zip`，解压得到：
 - `decryptor.node` —— 放入游戏发行包根目录
 - `encrypt_config.json` —— 本地加密阶段使用
 - `author_secret.txt` —— 离线保存，绝对不要放进游戏包！
 
-**5. 删除 Fork 仓库**
+**4. 删除 Fork 仓库**
 下载后立即删除，确保日志和密钥不泄露。
 
 
