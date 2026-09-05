@@ -10,6 +10,9 @@
         "-lssl",
         "-lcrypto"
       ],
+      "library_dirs": [
+        "$(VCPKG_ROOT)/installed/x64-windows/lib"
+      ],
       "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"]
     }
   ]
