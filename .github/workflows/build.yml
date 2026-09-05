@@ -33,9 +33,10 @@ jobs:
           git clone https://github.com/Microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install openssl:x64-windows
-          echo "VCPKG_ROOT=$env:GITHUB_WORKSPACE\vcpkg" >> $env:GITHUB_ENV
-          echo "LIB=$env:LIB;$env:GITHUB_WORKSPACE\vcpkg\installed\x64-windows\lib" >> $env:GITHUB_ENV
-          echo "INCLUDE=$env:INCLUDE;$env:GITHUB_WORKSPACE\vcpkg\installed\x64-windows\include" >> $env:GITHUB_ENV
+          $vcpkgRoot = (Get-Item .\vcpkg).FullName
+          echo "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
+          echo "LIB=$env:LIB;$vcpkgRoot\installed\x64-windows\lib" >> $env:GITHUB_ENV
+          echo "INCLUDE=$env:INCLUDE;$vcpkgRoot\installed\x64-windows\include" >> $env:GITHUB_ENV
         shell: powershell
 
       - name: 安装 Node.js
@@ -99,14 +100,15 @@ jobs:
           # 生成 Visual Studio 项目文件
           node-gyp configure --msvs_version=2022
 
-          # 使用 node-gyp build 编译（避免手动找 .sln 路径）
+          # 编译，通过 -- 显式传递库路径给链接器
           node-gyp build --release --msvs_version=2022 `
             -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
             -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
             -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
             -DHARD_EXPIRE="${{ steps.expire.outputs.timestamp }}" `
             -DWATCHDOG_TIMEOUT_SEC=10 `
-            -DWATCHDOG_MAX_MISS=2
+            -DWATCHDOG_MAX_MISS=2 `
+            -- -L"$($env:VCPKG_ROOT)\installed\x64-windows\lib"
         shell: powershell
 
       - name: 生成加密配置
