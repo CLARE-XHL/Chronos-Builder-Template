@@ -656,16 +656,74 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// Node-API 模块注册（修正版）
+// 纯 C N-API 模块注册（参考 V1.3 风格，能过 MSVC）
 // ============================================================
 
-Napi::Object Init(Napi::Env env, Napi::Object exports) {
-    exports.Set("initialize", Napi::Function::New(env, Initialize));
-    exports.Set("decryptAsset", Napi::Function::New(env, DecryptAsset));
-    exports.Set("startWatchdog", Napi::Function::New(env, StartWatchdog));
-    exports.Set("stopWatchdog", Napi::Function::New(env, StopWatchdog));
-    exports.Set("heartbeatReply", Napi::Function::New(env, HeartbeatReply));
-    exports.Set("getWatchdogState", Napi::Function::New(env, GetWatchdogState));
+// 每个导出函数的纯 C 包装器
+static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = Initialize(cinfo);
+    return result.Value();
+}
+
+static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = DecryptAsset(cinfo);
+    return result.Value();
+}
+
+static napi_value WrapStartWatchdog(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    StartWatchdog(cinfo);
+    return nullptr;
+}
+
+static napi_value WrapStopWatchdog(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    StopWatchdog(cinfo);
+    return nullptr;
+}
+
+static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    HeartbeatReply(cinfo);
+    return nullptr;
+}
+
+static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = GetWatchdogState(cinfo);
+    return result.Value();
+}
+
+// Init 函数（纯 C N-API）
+static napi_value Init(napi_env env, napi_value exports) {
+    napi_value fn;
+
+    napi_create_function(env, "initialize", NAPI_AUTO_LENGTH,
+                         WrapInitialize, nullptr, &fn);
+    napi_set_named_property(env, exports, "initialize", fn);
+
+    napi_create_function(env, "decryptAsset", NAPI_AUTO_LENGTH,
+                         WrapDecryptAsset, nullptr, &fn);
+    napi_set_named_property(env, exports, "decryptAsset", fn);
+
+    napi_create_function(env, "startWatchdog", NAPI_AUTO_LENGTH,
+                         WrapStartWatchdog, nullptr, &fn);
+    napi_set_named_property(env, exports, "startWatchdog", fn);
+
+    napi_create_function(env, "stopWatchdog", NAPI_AUTO_LENGTH,
+                         WrapStopWatchdog, nullptr, &fn);
+    napi_set_named_property(env, exports, "stopWatchdog", fn);
+
+    napi_create_function(env, "heartbeatReply", NAPI_AUTO_LENGTH,
+                         WrapHeartbeatReply, nullptr, &fn);
+    napi_set_named_property(env, exports, "heartbeatReply", fn);
+
+    napi_create_function(env, "getWatchdogState", NAPI_AUTO_LENGTH,
+                         WrapGetWatchdogState, nullptr, &fn);
+    napi_set_named_property(env, exports, "getWatchdogState", fn);
+
     return exports;
 }
 
