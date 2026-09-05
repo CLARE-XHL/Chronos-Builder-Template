@@ -28,15 +28,35 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
+      - name: 缓存 vcpkg
+        uses: actions/cache@v4
+        id: cache-vcpkg
+        with:
+          path: |
+            vcpkg
+            vcpkg/downloads
+            vcpkg/packages
+            vcpkg/installed
+            vcpkg/buildtrees
+          key: vcpkg-windows-${{ runner.os }}-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-windows-${{ runner.os }}-
+
       - name: 安装 OpenSSL
+        if: steps.cache-vcpkg.outputs.cache-hit != 'true'
         run: |
           git clone https://github.com/Microsoft/vcpkg.git
           .\vcpkg\bootstrap-vcpkg.bat
           .\vcpkg\vcpkg install openssl:x64-windows
+        shell: powershell
+
+      - name: 设置 OpenSSL 环境
+        run: |
           $vcpkgRoot = (Get-Item .\vcpkg).FullName
           echo "VCPKG_ROOT=$vcpkgRoot" >> $env:GITHUB_ENV
           echo "LIB=$env:LIB;$vcpkgRoot\installed\x64-windows\lib" >> $env:GITHUB_ENV
           echo "INCLUDE=$env:INCLUDE;$vcpkgRoot\installed\x64-windows\include" >> $env:GITHUB_ENV
+          echo "OpenSSL installed"
         shell: powershell
 
       - name: 安装 Node.js
@@ -74,7 +94,6 @@ jobs:
 
       - name: 编译 decryptor.node（手动 MSBuild）
         run: |
-          # 使用 vswhere 定位 Visual Studio 2022
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
           if (-not $vspath) {
             Write-Error "Visual Studio 2022 not found"
@@ -82,7 +101,6 @@ jobs:
           }
           Write-Host "Using VS at: $vspath"
 
-          # 设置环境变量
           $env:VCINSTALLDIR = "$vspath\VC"
           $env:VSINSTALLDIR = $vspath
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
@@ -94,13 +112,9 @@ jobs:
 
           cd native
 
-          # 安装 node-addon-api
           npm install node-addon-api
-
-          # 生成 Visual Studio 项目文件
           node-gyp configure --msvs_version=2022
 
-          # 查找 MSBuild
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
           if (-not $msbuild) {
             Write-Error "MSBuild not found"
@@ -108,11 +122,9 @@ jobs:
           }
           Write-Host "Using MSBuild at: $msbuild"
 
-          # 获取 OpenSSL 库路径
           $openSslLibPath = "$env:VCPKG_ROOT\installed\x64-windows\lib"
           Write-Host "OpenSSL lib path: $openSslLibPath"
 
-          # 手动 MSBuild 编译，显式传递库路径
           & $msbuild build\decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:LIBPATH="$openSslLibPath" /p:AdditionalLibraryDirectories="$openSslLibPath" /m
         shell: powershell
 
