@@ -95,7 +95,7 @@ jobs:
           }
 
           $env:VCINSTALLDIR = "$vspath\VC"
-          $env:VSINSTALLDIR = $vspath
+          $env:VSINSTALLDIR = "$vspath"
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
           $env:VSCMD_ARG_TGT_ARCH = "x64"
           $env:VSCMD_ARG_HOST_ARCH = "x64"
@@ -109,7 +109,7 @@ jobs:
           $openSslLibPath = "$vcpkgRoot\installed\x64-windows\lib"
           Write-Host "OpenSSL lib path: $openSslLibPath"
 
-          # 动态生成 binding.gyp，使用绝对路径
+          # 动态生成 binding.gyp
           $bindingContent = @"
 {
   "targets": [
@@ -130,17 +130,11 @@ jobs:
 "@
           Set-Content -Path "binding.gyp" -Value $bindingContent
 
-          # 确认文件存在
           Write-Host "=== Checking library files ==="
           Get-ChildItem $openSslLibPath -Filter *.lib | ForEach-Object { Write-Host $_.Name }
 
-          # 安装 node-addon-api
           npm install node-addon-api
-
-          # 生成 VS 项目
           node-gyp configure --msvs_version=2022
-
-          # 编译
           node-gyp build --release --msvs_version=2022
         shell: powershell
 
