@@ -7,8 +7,8 @@
         "<!@(node -p \"require('node-addon-api').include\")"
       ],
       "libraries": [
-        "-lssl",
-        "-lcrypto"
+        "-llibssl",
+        "-llibcrypto"
       ],
       "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"]
     }
