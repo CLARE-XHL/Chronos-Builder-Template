@@ -28,7 +28,7 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装 OpenSSL（Chocolatey 预编译版）
+      - name: 安装 OpenSSL
         run: |
           choco install openssl -y
           echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
@@ -77,7 +77,6 @@ jobs:
             Write-Error "Visual Studio 2022 not found"
             exit 1
           }
-
           $env:VCINSTALLDIR = "$vspath\VC"
           $env:VSINSTALLDIR = "$vspath"
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
@@ -86,106 +85,27 @@ jobs:
           $env:PATH += ";$($env:VCToolsInstallDir)\bin\HostX64\x64"
           $env:INCLUDE = "$($env:VCToolsInstallDir)\include;C:\Program Files\OpenSSL-Win64\include;$env:INCLUDE"
           $env:LIB = "$($env:VCToolsInstallDir)\lib\x64;C:\Program Files\OpenSSL-Win64\lib;$env:LIB"
-
           cd native
-
           $nodeIncludePath = "$env:USERPROFILE\AppData\Local\node-gyp\Cache\18.20.8\include\node"
           if (-not (Test-Path $nodeIncludePath)) {
             $nodeInstall = (Get-Command node).Source
             $nodeIncludePath = Join-Path (Split-Path $nodeInstall -Parent) "include\node"
           }
-
           $openSslIncludePath = "C:\Program Files\OpenSSL-Win64\include"
           $openSslLibPath = "C:\Program Files\OpenSSL-Win64\lib"
-
-          # 用 YAML 多行方式在 run: 里直接写 XML（用 -join 拼接数组，避免 YAML 解析问题）
-          $xmlLines = @()
-          $xmlLines += '<?xml version="1.0" encoding="utf-8"?>'
-          $xmlLines += '<Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">'
-          $xmlLines += '  <ItemGroup Label="ProjectConfigurations">'
-          $xmlLines += '    <ProjectConfiguration Include="Release|x64">'
-          $xmlLines += '      <Configuration>Release</Configuration>'
-          $xmlLines += '      <Platform>x64</Platform>'
-          $xmlLines += '    </ProjectConfiguration>'
-          $xmlLines += '  </ItemGroup>'
-          $xmlLines += '  <PropertyGroup Label="Globals">'
-          $xmlLines += '    <VCProjectVersion>15.0</VCProjectVersion>'
-          $xmlLines += '    <ProjectGuid>{7B6A0D0A-9B5E-4F5E-8B7A-6D5E4F3A2B1C}</ProjectGuid>'
-          $xmlLines += '    <RootNamespace>decryptor</RootNamespace>'
-          $xmlLines += '    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>'
-          $xmlLines += '  </PropertyGroup>'
-          $xmlLines += '  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />'
-          $xmlLines += '  <PropertyGroup Condition="'\''$(Configuration)|$(Platform)'\''=='\''Release|x64'\''" Label="Configuration">'
-          $xmlLines += '    <ConfigurationType>DynamicLibrary</ConfigurationType>'
-          $xmlLines += '    <UseDebugLibraries>false</UseDebugLibraries>'
-          $xmlLines += '    <PlatformToolset>v143</PlatformToolset>'
-          $xmlLines += '    <CharacterSet>Unicode</CharacterSet>'
-          $xmlLines += '  </PropertyGroup>'
-          $xmlLines += '  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />'
-          $xmlLines += '  <ImportGroup Label="ExtensionSettings"></ImportGroup>'
-          $xmlLines += '  <ImportGroup Label="Shared"></ImportGroup>'
-          $xmlLines += '  <ImportGroup Label="PropertySheets" Condition="'\''$(Configuration)|$(Platform)'\''=='\''Release|x64'\''">'
-          $xmlLines += '    <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('\''$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props'\'')" Label="LocalAppPlatform" />'
-          $xmlLines += '  </ImportGroup>'
-          $xmlLines += '  <PropertyGroup Label="UserMacros" />'
-          $xmlLines += '  <PropertyGroup Condition="'\''$(Configuration)|$(Platform)'\''=='\''Release|x64'\''">'
-          $xmlLines += '    <TargetName>decryptor</TargetName>'
-          $xmlLines += '    <TargetExt>.node</TargetExt>'
-          $xmlLines += '    <IncludePath>$(VC_IncludePath);$(WindowsSDK_IncludePath);' + $nodeIncludePath + ';' + $openSslIncludePath + '</IncludePath>'
-          $xmlLines += '  </PropertyGroup>'
-          $xmlLines += '  <ItemDefinitionGroup Condition="'\''$(Configuration)|$(Platform)'\''=='\''Release|x64'\''">'
-          $xmlLines += '    <ClCompile>'
-          $xmlLines += '      <WarningLevel>Level3</WarningLevel>'
-          $xmlLines += '      <Optimization>MaxSpeed</Optimization>'
-          $xmlLines += '      <FunctionLevelLinking>true</FunctionLevelLinking>'
-          $xmlLines += '      <IntrinsicFunctions>true</IntrinsicFunctions>'
-          $xmlLines += '      <SDLCheck>true</SDLCheck>'
-          $xmlLines += '      <ConformanceMode>true</ConformanceMode>'
-          $xmlLines += '      <PreprocessorDefinitions>NAPI_DISABLE_CPP_EXCEPTIONS;WIN32;_CRT_SECURE_NO_DEPRECATE;_CRT_NONSTDC_NO_DEPRECATE;BUILDING_NODE_EXTENSION;%(PreprocessorDefinitions)</PreprocessorDefinitions>'
-          $xmlLines += '      <AdditionalIncludeDirectories>' + $nodeIncludePath + ';' + $openSslIncludePath + ';.\node_modules\node-addon-api;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>'
-          $xmlLines += '      <ExceptionHandling>false</ExceptionHandling>'
-          $xmlLines += '      <LanguageStandard>stdcpp17</LanguageStandard>'
-          $xmlLines += '    </ClCompile>'
-          $xmlLines += '    <Link>'
-          $xmlLines += '      <SubSystem>Console</SubSystem>'
-          $xmlLines += '      <GenerateDebugInformation>true</GenerateDebugInformation>'
-          $xmlLines += '      <EnableCOMDATFolding>true</EnableCOMDATFolding>'
-          $xmlLines += '      <OptimizeReferences>true</OptimizeReferences>'
-          $xmlLines += '      <AdditionalLibraryDirectories>' + $openSslLibPath + ';%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>'
-          $xmlLines += '      <AdditionalDependencies>libssl.lib;libcrypto.lib;node.lib;kernel32.lib;user32.lib;%(AdditionalDependencies)</AdditionalDependencies>'
-          $xmlLines += '      <ModuleDefinitionFile>win_delay_load_hook.cc</ModuleDefinitionFile>'
-          $xmlLines += '      <DelayLoadDLLs>node.exe;%(DelayLoadDLLs)</DelayLoadDLLs>'
-          $xmlLines += '    </Link>'
-          $xmlLines += '  </ItemDefinitionGroup>'
-          $xmlLines += '  <ItemGroup>'
-          $xmlLines += '    <ClCompile Include="src\decryptor.cc" />'
-          $xmlLines += '    <ClCompile Include="win_delay_load_hook.cc" />'
-          $xmlLines += '  </ItemGroup>'
-          $xmlLines += '  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />'
-          $xmlLines += '</Project>'
-
-          $vcxprojContent = $xmlLines -join "`n"
-          Set-Content -Path "decryptor.vcxproj" -Value $vcxprojContent
-
-          # 生成 win_delay_load_hook.cc
-          $hookContent = @"
-#ifdef _MSC_VER
-#pragma comment(linker, "/DELAYLOAD:node.exe")
-#endif
-"@
-          Set-Content -Path "win_delay_load_hook.cc" -Value $hookContent
-
-          # 查找 MSBuild
+          $template = Get-Content "decryptor.vcxproj.template" -Raw
+          $template = $template -replace "NODE_INCLUDE_PATH", $nodeIncludePath
+          $template = $template -replace "OPENSSL_INCLUDE_PATH", $openSslIncludePath
+          $template = $template -replace "OPENSSL_LIB_PATH", $openSslLibPath
+          Set-Content -Path "decryptor.vcxproj" -Value $template
+          $hookTemplate = Get-Content "win_delay_load_hook.cc.template" -Raw
+          Set-Content -Path "win_delay_load_hook.cc" -Value $hookTemplate
           $msbuild = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.Component.MSBuild -find MSBuild\**\Bin\MSBuild.exe
           if (-not $msbuild) {
             Write-Error "MSBuild not found"
             exit 1
           }
-
-          # 编译
           & $msbuild decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /p:AdditionalLibraryDirectories="$openSslLibPath" /p:AdditionalDependencies="libssl.lib;libcrypto.lib" /m
-
-          # 复制产物到根目录
           if (Test-Path "Release\decryptor.node") {
             Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
           }
