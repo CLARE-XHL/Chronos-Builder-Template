@@ -4,21 +4,11 @@ project(decryptor)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 使用 CMake 命令行传入的变量（由 build.yml 设置）
-# 如果变量未定义，使用默认后备路径
-if (NOT NODE_ADDON_API_INCLUDE)
-    set(NODE_ADDON_API_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api")
-endif()
+# node-api-headers 提供了 node_api.h 等核心头文件
+# node-addon-api 提供了 napi.h 等 C++ 包装器
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-api-headers/include)
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api)
 
-if (NOT NODE_HEADERS_INCLUDE)
-    set(NODE_HEADERS_INCLUDE "${CMAKE_CURRENT_SOURCE_DIR}/../node-headers/include/node")
-endif()
-
-# 添加包含目录
-include_directories(${NODE_ADDON_API_INCLUDE})
-include_directories(${NODE_HEADERS_INCLUDE})
-
-# OpenSSL 路径由命令行传入
 add_library(decryptor SHARED src/decryptor.cc)
 
 set_target_properties(decryptor PROPERTIES
@@ -37,7 +27,7 @@ target_compile_definitions(decryptor PRIVATE
 )
 
 target_include_directories(decryptor PRIVATE
-    ${NODE_ADDON_API_INCLUDE}
-    ${NODE_HEADERS_INCLUDE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api
+    ${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-api-headers/include
     ${OPENSSL_INCLUDE_DIR}
 )
