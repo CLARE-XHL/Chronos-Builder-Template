@@ -80,10 +80,14 @@ jobs:
         run: |
           cd native
 
-          $openSslRoot = "C:\Program Files\OpenSSL-Win64"
+          $openSslRoot = "C:/Program Files/OpenSSL-Win64"
 
-          # 用 CMake 生成 Visual Studio 项目
-          cmake . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="$openSslRoot"
+          # 用 CMake 生成 Visual Studio 项目，显式指定 OpenSSL 路径
+          cmake . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release `
+            -DOPENSSL_ROOT_DIR="$openSslRoot" `
+            -DOPENSSL_INCLUDE_DIR="$openSslRoot/include" `
+            -DOPENSSL_CRYPTO_LIBRARY="$openSslRoot/lib/libcrypto.lib" `
+            -DOPENSSL_SSL_LIBRARY="$openSslRoot/lib/libssl.lib"
 
           # 用 MSBuild 编译
           msbuild decryptor.sln /p:Configuration=Release /p:Platform=x64 /m
