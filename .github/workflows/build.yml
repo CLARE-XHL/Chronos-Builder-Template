@@ -28,9 +28,9 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 下载预编译 OpenSSL
+      - name: 下载预编译 OpenSSL（完整版）
         run: |
-          Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL-3_4_0.exe" -OutFile "openssl.exe"
+          Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL-3_5_2.exe" -OutFile "openssl.exe"
           mkdir C:\openssl -Force
           7z x openssl.exe -oC:\openssl
         shell: powershell
