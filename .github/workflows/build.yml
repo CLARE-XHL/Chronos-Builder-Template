@@ -52,8 +52,8 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: 安装 node-addon-api
-        run: npm install node-addon-api
+      - name: 安装 node-addon-api 和 node-api-headers
+        run: npm install node-addon-api node-api-headers
         shell: powershell
         working-directory: native
 
@@ -80,34 +80,13 @@ jobs:
         run: |
           cd native
 
-          # 获取 node-addon-api 路径
-          try {
-            $nodeApiInclude = node -p "require('node-addon-api').include"
-          } catch {
-            $nodeApiInclude = ".\node_modules\node-addon-api"
-          }
-
-          # 获取 Node.js 核心头文件路径
-          $nodeExe = (Get-Command node).Source
-          $nodeHeadersInclude = Join-Path (Split-Path $nodeExe -Parent) "include\node"
-
-          if (-not (Test-Path $nodeHeadersInclude)) {
-            $nodeVersion = node -p "process.version" -replace 'v', ''
-            $nodeHeadersInclude = "$env:USERPROFILE\AppData\Local\node-gyp\Cache\$nodeVersion\include\node"
-          }
-
-          Write-Host "node-api include: $nodeApiInclude"
-          Write-Host "node headers include: $nodeHeadersInclude"
-
           $openSslRoot = "C:/Program Files/OpenSSL-Win64"
 
           cmake . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release `
             -DOPENSSL_ROOT_DIR="$openSslRoot" `
             -DOPENSSL_INCLUDE_DIR="$openSslRoot/include" `
             -DOPENSSL_CRYPTO_LIBRARY="$openSslRoot/lib/libcrypto.lib" `
-            -DOPENSSL_SSL_LIBRARY="$openSslRoot/lib/libssl.lib" `
-            -DNODE_ADDON_API_INCLUDE="$nodeApiInclude" `
-            -DNODE_HEADERS_INCLUDE="$nodeHeadersInclude"
+            -DOPENSSL_SSL_LIBRARY="$openSslRoot/lib/libssl.lib"
 
           msbuild decryptor.sln /p:Configuration=Release /p:Platform=x64 /m
 
