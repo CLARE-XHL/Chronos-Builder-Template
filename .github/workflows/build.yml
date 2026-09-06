@@ -28,7 +28,7 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装 OpenSSL（Chocolatey 预编译版）
+      - name: 安装 OpenSSL
         run: |
           choco install openssl -y
           echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
@@ -46,8 +46,11 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装 node-addon-api 和 cmake-js
-        run: npm install node-addon-api cmake-js
+      - name: 安装 CMake
+        uses: lukka/get-cmake@latest
+
+      - name: 安装 node-addon-api
+        run: npm install node-addon-api
         shell: powershell
         working-directory: native
 
@@ -70,16 +73,20 @@ jobs:
           }
         shell: powershell
 
-      - name: 编译 decryptor.node（CMake.js）
+      - name: 编译 decryptor.node（纯 CMake + MSBuild）
         run: |
           cd native
-          $env:OPENSSL_ROOT_DIR = "C:\Program Files\OpenSSL-Win64"
-          $env:OPENSSL_LIBRARIES = "C:\Program Files\OpenSSL-Win64\lib"
-          $env:OPENSSL_INCLUDE_DIR = "C:\Program Files\OpenSSL-Win64\include"
-          npx cmake-js rebuild -T decryptor -B Release -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64"
-          if (Test-Path "build\Release\decryptor.node") {
-            Copy-Item "build\Release\decryptor.node" "..\decryptor.node" -Force
-          } elseif (Test-Path "Release\decryptor.node") {
+
+          $openSslRoot = "C:\Program Files\OpenSSL-Win64"
+
+          # 用 CMake 生成 Visual Studio 项目
+          cmake . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="$openSslRoot"
+
+          # 用 MSBuild 编译
+          msbuild decryptor.sln /p:Configuration=Release /p:Platform=x64 /m
+
+          # 复制产物到根目录
+          if (Test-Path "Release\decryptor.node") {
             Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
           }
         shell: powershell
