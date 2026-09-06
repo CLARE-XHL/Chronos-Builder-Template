@@ -28,7 +28,7 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装 OpenSSL
+      - name: 安装 OpenSSL（Chocolatey 预编译版）
         run: |
           choco install openssl -y
           echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
@@ -73,17 +73,12 @@ jobs:
       - name: 编译 decryptor.node（CMake.js）
         run: |
           cd native
-          # 设置 OpenSSL 路径
           $env:OPENSSL_ROOT_DIR = "C:\Program Files\OpenSSL-Win64"
           $env:OPENSSL_LIBRARIES = "C:\Program Files\OpenSSL-Win64\lib"
           $env:OPENSSL_INCLUDE_DIR = "C:\Program Files\OpenSSL-Win64\include"
-          # 编译
-          npx cmake-js compile -T decryptor -B Release -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64"
-          # 复制产物到根目录
+          npx cmake-js rebuild -T decryptor -B Release -DCMAKE_BUILD_TYPE=Release -DOPENSSL_ROOT_DIR="C:\Program Files\OpenSSL-Win64"
           if (Test-Path "build\Release\decryptor.node") {
             Copy-Item "build\Release\decryptor.node" "..\decryptor.node" -Force
-          } elseif (Test-Path "build\Release\decryptor") {
-            Copy-Item "build\Release\decryptor" "..\decryptor.node" -Force
           } elseif (Test-Path "Release\decryptor.node") {
             Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
           }
