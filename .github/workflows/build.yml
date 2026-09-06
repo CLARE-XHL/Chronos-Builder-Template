@@ -28,12 +28,11 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 安装 OpenSSL
+      - name: 下载预编译 OpenSSL
         run: |
-          choco install openssl -y
-          echo "OPENSSL_ROOT_DIR=C:\Program Files\OpenSSL-Win64" >> $env:GITHUB_ENV
-          echo "OPENSSL_LIBRARIES=C:\Program Files\OpenSSL-Win64\lib" >> $env:GITHUB_ENV
-          echo "OPENSSL_INCLUDE_DIR=C:\Program Files\OpenSSL-Win64\include" >> $env:GITHUB_ENV
+          curl -L -o openssl.zip https://slproweb.com/download/Win64OpenSSL-3_4_0.exe
+          # 用 7z 解压（GitHub Actions 自带）
+          7z x openssl.zip -oC:\openssl
         shell: powershell
 
       - name: 安装 Node.js
@@ -74,8 +73,9 @@ jobs:
 
           $nodeHeaders = Resolve-Path ".\node_modules\node-api-headers\include"
           $nodeAddonApi = Resolve-Path ".\node_modules\node-addon-api"
-          $openSslInclude = "C:\Program Files\OpenSSL-Win64\include"
-          $openSslLib = "C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
+          $openSslRoot = "C:/openssl"
+          $openSslInclude = "$openSslRoot/include"
+          $openSslLib = "$openSslRoot/lib"
 
           $env:NodeHeadersPath = $nodeHeaders
           $env:NodeAddonApiPath = $nodeAddonApi
