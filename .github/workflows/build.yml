@@ -30,9 +30,9 @@ jobs:
 
       - name: 下载预编译 OpenSSL
         run: |
-          curl -L -o openssl.zip https://slproweb.com/download/Win64OpenSSL-3_4_0.exe
-          # 用 7z 解压（GitHub Actions 自带）
-          7z x openssl.zip -oC:\openssl
+          Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL-3_4_0.exe" -OutFile "openssl.exe"
+          mkdir C:\openssl -Force
+          7z x openssl.exe -oC:\openssl
         shell: powershell
 
       - name: 安装 Node.js
