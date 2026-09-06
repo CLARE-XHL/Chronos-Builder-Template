@@ -80,19 +80,37 @@ jobs:
         run: |
           cd native
 
+          # 获取 Node.js 头文件路径
+          $nodeApiInclude = node -p "require('node-addon-api').include" 2>nul
+          if (-not $nodeApiInclude) {
+            $nodeApiInclude = ".\node_modules\node-addon-api"
+          }
+
+          # 获取 Node.js 核心头文件路径（node_api.h 所在目录）
+          $nodeExe = (Get-Command node).Source
+          $nodeHeadersInclude = Join-Path (Split-Path $nodeExe -Parent) "include\node"
+          
+          # 如果上面的路径不存在，尝试从 node-gyp 缓存获取
+          if (-not (Test-Path $nodeHeadersInclude)) {
+            $nodeVersion = node -p "process.version" -replace 'v', ''
+            $nodeHeadersInclude = "$env:USERPROFILE\AppData\Local\node-gyp\Cache\$nodeVersion\include\node"
+          }
+
+          Write-Host "node-api include: $nodeApiInclude"
+          Write-Host "node headers include: $nodeHeadersInclude"
+
           $openSslRoot = "C:/Program Files/OpenSSL-Win64"
 
-          # 用 CMake 生成 Visual Studio 项目，显式指定 OpenSSL 路径
           cmake . -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release `
             -DOPENSSL_ROOT_DIR="$openSslRoot" `
             -DOPENSSL_INCLUDE_DIR="$openSslRoot/include" `
             -DOPENSSL_CRYPTO_LIBRARY="$openSslRoot/lib/libcrypto.lib" `
-            -DOPENSSL_SSL_LIBRARY="$openSslRoot/lib/libssl.lib"
+            -DOPENSSL_SSL_LIBRARY="$openSslRoot/lib/libssl.lib" `
+            -DNODE_ADDON_API_INCLUDE="$nodeApiInclude" `
+            -DNODE_HEADERS_INCLUDE="$nodeHeadersInclude"
 
-          # 用 MSBuild 编译
           msbuild decryptor.sln /p:Configuration=Release /p:Platform=x64 /m
 
-          # 复制产物到根目录
           if (Test-Path "Release\decryptor.node") {
             Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
           }
