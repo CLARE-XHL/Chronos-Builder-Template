@@ -4,16 +4,20 @@ project(decryptor)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# 直接添加头文件路径（node-addon-api 没有 CMakeLists.txt）
+# 添加 node-addon-api 头文件路径
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api)
 
-# 设置 OpenSSL 路径（关键！）
+# --- 关键修改开始 ---
+# 直接设置 OpenSSL 库的绝对路径
 set(OPENSSL_ROOT_DIR "C:/Program Files/OpenSSL-Win64")
+set(OPENSSL_INCLUDE_DIR "C:/Program Files/OpenSSL-Win64/include")
 set(OPENSSL_CRYPTO_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/libcrypto.lib")
 set(OPENSSL_SSL_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/libssl.lib")
-set(OPENSSL_INCLUDE_DIR "C:/Program Files/OpenSSL-Win64/include")
+# 告诉 CMake 这些变量是有效的
+set(OPENSSL_FOUND TRUE)
+# --- 关键修改结束 ---
 
-find_package(OpenSSL REQUIRED)
+# 不再需要 find_package(OpenSSL REQUIRED)
 
 add_library(decryptor SHARED src/decryptor.cc)
 
@@ -24,8 +28,8 @@ set_target_properties(decryptor PROPERTIES
 )
 
 target_link_libraries(decryptor
-    OpenSSL::SSL
-    OpenSSL::Crypto
+    ${OPENSSL_SSL_LIBRARY}
+    ${OPENSSL_CRYPTO_LIBRARY}
 )
 
 target_compile_definitions(decryptor PRIVATE
