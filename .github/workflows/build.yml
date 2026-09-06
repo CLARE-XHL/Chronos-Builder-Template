@@ -80,17 +80,17 @@ jobs:
         run: |
           cd native
 
-          # 获取 Node.js 头文件路径
-          $nodeApiInclude = node -p "require('node-addon-api').include" 2>nul
-          if (-not $nodeApiInclude) {
+          # 获取 node-addon-api 路径
+          try {
+            $nodeApiInclude = node -p "require('node-addon-api').include"
+          } catch {
             $nodeApiInclude = ".\node_modules\node-addon-api"
           }
 
-          # 获取 Node.js 核心头文件路径（node_api.h 所在目录）
+          # 获取 Node.js 核心头文件路径
           $nodeExe = (Get-Command node).Source
           $nodeHeadersInclude = Join-Path (Split-Path $nodeExe -Parent) "include\node"
-          
-          # 如果上面的路径不存在，尝试从 node-gyp 缓存获取
+
           if (-not (Test-Path $nodeHeadersInclude)) {
             $nodeVersion = node -p "process.version" -replace 'v', ''
             $nodeHeadersInclude = "$env:USERPROFILE\AppData\Local\node-gyp\Cache\$nodeVersion\include\node"
