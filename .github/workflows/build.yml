@@ -76,7 +76,7 @@ jobs:
           }
         shell: powershell
 
-      - name: 编译 decryptor.node（纯 CMake + MSBuild）
+      - name: 编译 decryptor.node
         run: |
           cd native
 
