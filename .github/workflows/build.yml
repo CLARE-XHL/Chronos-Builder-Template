@@ -28,23 +28,22 @@ jobs:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
 
-      - name: 下载预编译 OpenSSL（完整版）
-        run: |
-          Invoke-WebRequest -Uri "https://slproweb.com/download/Win64OpenSSL-3_5_2.exe" -OutFile "openssl.exe"
-          mkdir C:\openssl -Force
-          7z x openssl.exe -oC:\openssl
-        shell: powershell
-
       - name: 安装 Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '18.x'
 
-      - name: Add msbuild to PATH
-        uses: microsoft/setup-msbuild@v2
+      - name: 安装 Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
-      - name: 安装 node-api-headers 和 node-addon-api
-        run: npm install node-api-headers node-addon-api
+      - name: 安装 node-gyp
+        run: npm install -g node-gyp@9.4.0
+        shell: powershell
+
+      - name: 安装 node-addon-api
+        run: npm install node-addon-api
         shell: powershell
         working-directory: native
 
@@ -69,24 +68,25 @@ jobs:
 
       - name: 编译 decryptor.node
         run: |
+          # 定位 VS 2022
+          $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
+          if (-not $vspath) {
+            Write-Error "Visual Studio 2022 not found"
+            exit 1
+          }
+
+          # 设置 VS 环境变量
+          $env:VCINSTALLDIR = "$vspath\VC"
+          $env:VSINSTALLDIR = "$vspath"
+          $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
+          $env:VSCMD_ARG_TGT_ARCH = "x64"
+          $env:VSCMD_ARG_HOST_ARCH = "x64"
+          $env:PATH += ";$($env:VCToolsInstallDir)\bin\HostX64\x64"
+
           cd native
 
-          $nodeHeaders = Resolve-Path ".\node_modules\node-api-headers\include"
-          $nodeAddonApi = Resolve-Path ".\node_modules\node-addon-api"
-          $openSslRoot = "C:/openssl"
-          $openSslInclude = "$openSslRoot/include"
-          $openSslLib = "$openSslRoot/lib"
-
-          $env:NodeHeadersPath = $nodeHeaders
-          $env:NodeAddonApiPath = $nodeAddonApi
-          $env:OpenSSLIncludePath = $openSslInclude
-          $env:OpenSSLLibPath = $openSslLib
-
-          msbuild decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
-
-          if (Test-Path "Release\decryptor.node") {
-            Copy-Item "Release\decryptor.node" "..\decryptor.node" -Force
-          }
+          node-gyp configure --msvs_version=2022
+          node-gyp build --release --msvs_version=2022
         shell: powershell
 
       - name: 生成加密配置
@@ -125,8 +125,9 @@ jobs:
       - name: 校验产物
         id: verify
         run: |
-          if (-not (Test-Path "decryptor.node")) {
-            Write-Error "decryptor.node not found"
+          $nodePath = "native\build\Release\decryptor.node"
+          if (-not (Test-Path $nodePath)) {
+            Write-Error "decryptor.node not found at: $nodePath"
             exit 1
           }
           if (-not (Test-Path "encrypt_config.json")) {
@@ -145,6 +146,6 @@ jobs:
         with:
           name: chronos-seal-output
           path: |
-            decryptor.node
+            native\build\Release\decryptor.node
             encrypt_config.json
             author_secret.txt
