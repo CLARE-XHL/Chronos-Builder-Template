@@ -49,6 +49,9 @@ jobs:
       - name: 安装 CMake
         uses: lukka/get-cmake@latest
 
+      - name: Add msbuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
       - name: 安装 node-addon-api
         run: npm install node-addon-api
         shell: powershell
