@@ -44,8 +44,8 @@ jobs:
       - name: Add msbuild to PATH
         uses: microsoft/setup-msbuild@v2
 
-      - name: 安装 node-api-headers
-        run: npm install node-api-headers
+      - name: 安装 node-api-headers 和 node-addon-api
+        run: npm install node-api-headers node-addon-api
         shell: powershell
         working-directory: native
 
@@ -72,16 +72,16 @@ jobs:
         run: |
           cd native
 
-          # 设置环境变量供 .vcxproj 使用
           $nodeHeaders = Resolve-Path ".\node_modules\node-api-headers\include"
+          $nodeAddonApi = Resolve-Path ".\node_modules\node-addon-api"
           $openSslInclude = "C:\Program Files\OpenSSL-Win64\include"
           $openSslLib = "C:\Program Files\OpenSSL-Win64\lib\VC\x64\MD"
 
           $env:NodeHeadersPath = $nodeHeaders
+          $env:NodeAddonApiPath = $nodeAddonApi
           $env:OpenSSLIncludePath = $openSslInclude
           $env:OpenSSLLibPath = $openSslLib
 
-          # 编译
           msbuild decryptor.vcxproj /p:Configuration=Release /p:Platform=x64 /m
 
           if (Test-Path "Release\decryptor.node") {
