@@ -8,11 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-api-headers/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api)
 
-# OpenSSL 头文件（硬编码路径，不依赖命令行传参）
-set(OPENSSL_INCLUDE_DIR "C:/Program Files/OpenSSL-Win64/include")
-set(OPENSSL_SSL_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/libssl.lib")
-set(OPENSSL_CRYPTO_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/libcrypto.lib")
-
+# OpenSSL 路径由 CMake 命令行传入（-DOPENSSL_*）
+# 这里不再硬编码，直接使用变量
 include_directories(${OPENSSL_INCLUDE_DIR})
 
 add_library(decryptor SHARED src/decryptor.cc)
