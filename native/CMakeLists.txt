@@ -4,10 +4,16 @@ project(decryptor)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# node-api-headers 提供了 node_api.h 等核心头文件
-# node-addon-api 提供了 napi.h 等 C++ 包装器
+# Node.js 头文件
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-api-headers/include)
 include_directories(${CMAKE_CURRENT_SOURCE_DIR}/node_modules/node-addon-api)
+
+# OpenSSL 头文件（硬编码路径，不依赖命令行传参）
+set(OPENSSL_INCLUDE_DIR "C:/Program Files/OpenSSL-Win64/include")
+set(OPENSSL_SSL_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/libssl.lib")
+set(OPENSSL_CRYPTO_LIBRARY "C:/Program Files/OpenSSL-Win64/lib/libcrypto.lib")
+
+include_directories(${OPENSSL_INCLUDE_DIR})
 
 add_library(decryptor SHARED src/decryptor.cc)
 
