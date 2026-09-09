@@ -10,12 +10,7 @@
         "-lssl",
         "-lcrypto"
       ],
-      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
-      "msvs_settings": {
-        "VCCLCompilerTool": {
-          "AdditionalOptions": ["/wd7624"]
-        }
-      }
+      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"]
     }
   ]
 }
