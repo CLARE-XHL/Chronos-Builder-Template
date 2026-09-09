@@ -632,13 +632,13 @@ extern "C" {
 static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = Initialize(cinfo);
-    return result.Value();
+    return result;   // 去掉 .Value()
 }
 
 static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = DecryptAsset(cinfo);
-    return result.Value();
+    return result;   // 去掉 .Value()
 }
 
 static napi_value WrapStartWatchdog(napi_env env, napi_callback_info info) {
@@ -662,7 +662,7 @@ static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
 static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = GetWatchdogState(cinfo);
-    return result.Value();
+    return result;   // 去掉 .Value()
 }
 
 } // extern "C"
