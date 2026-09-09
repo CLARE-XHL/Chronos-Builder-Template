@@ -66,6 +66,11 @@
 #define WATCHDOG_MAX_MISS 2
 #endif
 
+// FIX 6: 降低素材大小上限到 50MB（原 200MB，防止 OOM）
+#ifndef MAX_ASSET_SIZE
+#define MAX_ASSET_SIZE (50 * 1024 * 1024)   // 50 MB
+#endif
+
 
 // ============================================================
 // 头文件
@@ -82,6 +87,7 @@
 #include <chrono>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
 #include <cstring>
 #include <algorithm>
 
@@ -105,7 +111,6 @@
 // ============================================================
 
 // #define WATCHDOG_LOGGING  // Release 版请注释掉
-// #define ENABLE_DEBUG_BASE64  // 调试用 Base64 函数（默认禁用）
 
 
 // ============================================================
@@ -117,7 +122,6 @@ const size_t HMAC_LEN = 32;
 const size_t IV_LEN = 16;
 const size_t MAGIC_LEN = 8;
 const size_t ASSET_HEADER_LEN = MAGIC_LEN + IV_LEN + HMAC_LEN;  // 56 字节
-const size_t MAX_ASSET_SIZE = 200 * 1024 * 1024;                // 200 MB
 
 // FIX: 魔数常量（8 字节）
 const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
@@ -141,10 +145,9 @@ enum ErrorCode {
 
 
 // ============================================================
-// 全局状态
+// 全局状态（看门狗使用条件变量 + join 修复 P0）
 // ============================================================
 
-// 看门狗状态（不再直接 exit，由 JS 层处理）
 struct WatchdogState {
     std::atomic<bool> heartbeat_received{false};
     std::atomic<int> missed_heartbeats{0};
@@ -153,6 +156,7 @@ struct WatchdogState {
     std::atomic<bool> started{false};
     std::thread thread;
     std::mutex mutex;
+    std::condition_variable cv;   // FIX 1: 条件变量用于唤醒
 } g_watchdog;
 
 // 单调时钟记录（检测系统时间回拨）
@@ -183,93 +187,16 @@ void write_watchdog_log(const std::string& msg) {
 
 
 // ============================================================
-// 固定时间 HMAC 比较（防计时攻击）—— FIX
+// FIX 5: 固定时间 HMAC 比较（volatile 防编译器优化）
 // ============================================================
 
 static bool constant_time_equals(const uint8_t* a, const uint8_t* b, size_t n) {
-    uint8_t diff = 0;
+    volatile uint8_t diff = 0;
     for (size_t i = 0; i < n; ++i) {
         diff |= a[i] ^ b[i];
     }
     return diff == 0;
 }
-
-
-// ============================================================
-// Base64 编解码（仅调试构建）
-// ============================================================
-
-#ifdef ENABLE_DEBUG_BASE64
-
-std::string base64_encode(const std::string& binary) {
-    static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string result;
-    size_t i = 0;
-    unsigned char char_array_3[3];
-    unsigned char char_array_4[4];
-
-    for (char c : binary) {
-        char_array_3[i++] = static_cast<unsigned char>(c);
-        if (i == 3) {
-            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-            char_array_4[3] = char_array_3[2] & 0x3f;
-            for (i = 0; i < 4; ++i) {
-                result += b64[char_array_4[i]];
-            }
-            i = 0;
-        }
-    }
-    if (i) {
-        for (int j = i; j < 3; ++j) char_array_3[j] = '\0';
-        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
-        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
-        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
-        char_array_4[3] = char_array_3[2] & 0x3f;
-        for (int j = 0; j < i + 1; ++j) {
-            result += b64[char_array_4[j]];
-        }
-        while (i++ < 3) result += '=';
-    }
-    return result;
-}
-
-std::string base64_decode(const std::string& encoded) {
-    static const std::string b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string result;
-    size_t i = 0;
-    unsigned char char_array_4[4], char_array_3[3];
-
-    for (char c : encoded) {
-        if (c == '=') break;
-        size_t pos = b64.find(c);
-        if (pos == std::string::npos) {
-            return "";
-        }
-        char_array_4[i++] = static_cast<unsigned char>(pos);
-        if (i == 4) {
-            char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-            char_array_3[1] = ((char_array_4[1] & 0x0f) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-            char_array_3[2] = ((char_array_4[2] & 0x03) << 6) + char_array_4[3];
-            for (i = 0; i < 3; ++i) {
-                result += static_cast<char>(char_array_3[i]);
-            }
-            i = 0;
-        }
-    }
-    if (i) {
-        for (int j = i; j < 4; ++j) char_array_4[j] = 0;
-        char_array_3[0] = (char_array_4[0] << 2) + ((char_array_4[1] & 0x30) >> 4);
-        char_array_3[1] = ((char_array_4[1] & 0x0f) << 4) + ((char_array_4[2] & 0x3c) >> 2);
-        for (int j = 0; j < i - 1; ++j) {
-            result += static_cast<char>(char_array_3[j]);
-        }
-    }
-    return result;
-}
-
-#endif // ENABLE_DEBUG_BASE64
 
 
 // ============================================================
@@ -300,6 +227,11 @@ void init_openssl() {
         RAND_poll();
 #endif
     });
+}
+
+// FIX 3: 统一清错误队列
+static void openssl_clear_err() {
+    while (ERR_get_error() != 0) {}
 }
 
 
@@ -374,6 +306,7 @@ std::string aes_encrypt(const std::string& plaintext, const unsigned char* key,
                            reinterpret_cast<const unsigned char*>(plaintext.c_str()),
                            static_cast<int>(plaintext.size()))) {
         EVP_CIPHER_CTX_free(ctx);
+        openssl_clear_err();
         return "";
     }
     total = len;
@@ -381,12 +314,14 @@ std::string aes_encrypt(const std::string& plaintext, const unsigned char* key,
     if (!EVP_EncryptFinal_ex(ctx,
                              reinterpret_cast<unsigned char*>(&ciphertext[total]), &len)) {
         EVP_CIPHER_CTX_free(ctx);
+        openssl_clear_err();
         return "";
     }
     total += len;
     ciphertext.resize(total);
 
     EVP_CIPHER_CTX_free(ctx);
+    openssl_clear_err();
     return ciphertext;
 }
 
@@ -395,10 +330,6 @@ struct DecryptResult {
     std::string data;
     int errCode;
 };
-
-static void openssl_clear_err() {
-    while (ERR_get_error() != 0) {}
-}
 
 DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* key,
                           const std::string& iv) {
@@ -446,6 +377,7 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
     plaintext.resize(total);
 
     EVP_CIPHER_CTX_free(ctx);
+    openssl_clear_err();
 
     result.ok = true;
     result.data = plaintext;
@@ -455,14 +387,189 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
 
 
 // ============================================================
-// 看门狗守护线程
+// 素材解密接口（核心）
 // ============================================================
 
-// 看门狗线程函数（定义在 start_watchdog_internal 之前）
-void watchdog_thread_func() {
-    while (!g_watchdog.watchdog_exit.load()) {
-        std::this_thread::sleep_for(std::chrono::seconds(WATCHDOG_TIMEOUT_SEC));
+// 外部 Buffer finalize 回调（用于释放内存）
+static void finalize_external_buffer(napi_env env, void* data, void* hint) {
+    if (data) {
+        delete[] static_cast<char*>(data);
+    }
+}
 
+Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    Napi::Object result = Napi::Object::New(env);
+
+    // 先清错误队列，防止脏数据
+    openssl_clear_err();
+
+    if (info.Length() < 1 || !info[0].IsBuffer()) {
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_INVALID_FORMAT));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    Napi::Buffer<char> encrypted_buf = info[0].As<Napi::Buffer<char>>();
+    size_t data_size = encrypted_buf.Length();
+
+    if (data_size < ASSET_HEADER_LEN) {
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_INVALID_FORMAT));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    if (data_size > MAX_ASSET_SIZE) {
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_ASSET_TOO_LARGE));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    const uint8_t* data = reinterpret_cast<const uint8_t*>(encrypted_buf.Data());
+
+    // 验证魔数
+    if (!constant_time_equals(data, MAGIC_BYTES, MAGIC_LEN)) {
+        openssl_clear_err();
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_INVALID_FORMAT));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    std::string iv(reinterpret_cast<const char*>(data + MAGIC_LEN), IV_LEN);
+    std::string stored_hmac(reinterpret_cast<const char*>(data + MAGIC_LEN + IV_LEN), HMAC_LEN);
+    std::string ciphertext(
+        reinterpret_cast<const char*>(data + ASSET_HEADER_LEN),
+        data_size - ASSET_HEADER_LEN);
+
+    std::string aes_key = derive_aes_key();
+    std::string hmac_key = derive_hmac_key();
+
+    if (aes_key.empty() || hmac_key.empty()) {
+        openssl_clear_err();
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    std::string computed_hmac = hmac_sha256(ciphertext, hmac_key);
+    if (computed_hmac.size() != HMAC_LEN ||
+        !constant_time_equals(
+            reinterpret_cast<const uint8_t*>(computed_hmac.data()),
+            reinterpret_cast<const uint8_t*>(stored_hmac.data()),
+            HMAC_LEN)) {
+        openssl_clear_err();
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_DECRYPT_HMAC));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    DecryptResult dec = aes_decrypt(ciphertext,
+        reinterpret_cast<const unsigned char*>(aes_key.c_str()), iv);
+
+    if (!dec.ok) {
+        openssl_clear_err();
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, dec.errCode));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    // FIX 2: 改用外部 Buffer，避免内存拷贝
+    char* data_ptr = new char[dec.data.size()];
+    memcpy(data_ptr, dec.data.c_str(), dec.data.size());
+    napi_value outData;
+    napi_create_external_buffer(env, dec.data.size(), data_ptr,
+                                finalize_external_buffer, nullptr, &outData);
+
+    result.Set("ok", Napi::Boolean::New(env, true));
+    result.Set("errCode", Napi::Number::New(env, SUCCESS));
+    result.Set("data", outData);
+
+    openssl_clear_err();
+    return result;
+}
+
+
+// ============================================================
+// 启动初始化（含时间回拨检测）
+// ============================================================
+
+Napi::Object Initialize(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    Napi::Object result = Napi::Object::New(env);
+
+    init_openssl();
+    openssl_clear_err();
+
+    time_t now = time(nullptr);
+    if (now > HARD_EXPIRE) {
+        result.Set("success", Napi::Boolean::New(env, false));
+        result.Set("errorCode", Napi::Number::New(env, ERR_EXPIRED));
+        result.Set("timeTamperDetected", Napi::Boolean::New(env, false));
+        return result;
+    }
+
+    // FIX 4: 如果第一次启动时系统时间严重偏差（比如早于 2000-01-01 或晚于 2040-01-01），直接拒绝
+    if (now < 946684800 || now > 2208988800) {  // 2000-01-01 ~ 2040-01-01
+        result.Set("success", Napi::Boolean::New(env, false));
+        result.Set("errorCode", Napi::Number::New(env, ERR_TIME_TAMPER));
+        result.Set("timeTamperDetected", Napi::Boolean::New(env, true));
+        openssl_clear_err();
+        return result;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_time_mutex);
+        if (!g_time_initialized) {
+            g_start_steady = std::chrono::steady_clock::now();
+            g_start_system_time = now;
+            g_time_initialized = true;
+        }
+    }
+
+    bool time_tamper_detected = false;
+    {
+        std::lock_guard<std::mutex> lock(g_time_mutex);
+        if (g_time_initialized) {
+            auto elapsed = std::chrono::steady_clock::now() - g_start_steady;
+            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            time_t expected_now = g_start_system_time + elapsed_seconds;
+            // 容忍 5 秒误差
+            if (now < expected_now - 5) {
+                time_tamper_detected = true;
+                write_watchdog_log("Time tamper detected: system time jumped backward");
+            }
+        }
+    }
+
+    result.Set("success", Napi::Boolean::New(env, true));
+    result.Set("errorCode", Napi::Number::New(env, SUCCESS));
+    result.Set("timeTamperDetected", Napi::Boolean::New(env, time_tamper_detected));
+    openssl_clear_err();
+    return result;
+}
+
+
+// ============================================================
+// 看门狗守护线程（修复 P0：条件变量 + join）
+// ============================================================
+
+void watchdog_thread_func() {
+    std::unique_lock<std::mutex> lock(g_watchdog.mutex);
+    while (!g_watchdog.watchdog_exit.load()) {
+        if (g_watchdog.cv.wait_for(lock, std::chrono::seconds(WATCHDOG_TIMEOUT_SEC),
+            [&] { return g_watchdog.watchdog_exit.load(); })) {
+            // 被唤醒且 exit 为 true，直接退出
+            break;
+        }
+
+        // 正常超时逻辑
         if (g_watchdog.watchdog_exit.load()) break;
 
         if (!g_watchdog.heartbeat_received.load()) {
@@ -482,7 +589,7 @@ void watchdog_thread_func() {
     write_watchdog_log("Watchdog thread exiting normally.");
 }
 
-static void start_watchdog_internal() {
+void StartWatchdog(const Napi::CallbackInfo& info) {
     std::lock_guard<std::mutex> lock(g_watchdog.mutex);
     if (!g_watchdog.started.load()) {
         g_watchdog.watchdog_exit.store(false);
@@ -490,19 +597,26 @@ static void start_watchdog_internal() {
         g_watchdog.missed_heartbeats.store(0);
         g_watchdog.triggered.store(false);
         g_watchdog.thread = std::thread(watchdog_thread_func);
-        g_watchdog.thread.detach();
         g_watchdog.started.store(true);
         write_watchdog_log("Watchdog started.");
     }
 }
 
-static void stop_watchdog_internal() {
-    g_watchdog.watchdog_exit.store(true);
+void StopWatchdog(const Napi::CallbackInfo& info) {
+    {
+        std::lock_guard<std::mutex> lock(g_watchdog.mutex);
+        g_watchdog.watchdog_exit.store(true);
+        g_watchdog.cv.notify_all();
+    }
+    // 等待线程真正退出
+    if (g_watchdog.thread.joinable()) {
+        g_watchdog.thread.join();
+    }
     g_watchdog.started.store(false);
-    write_watchdog_log("Watchdog stop signal sent.");
+    write_watchdog_log("Watchdog stopped.");
 }
 
-static void heartbeat_reply_internal() {
+void HeartbeatReply(const Napi::CallbackInfo& info) {
     g_watchdog.heartbeat_received.store(true);
     g_watchdog.missed_heartbeats.store(0);
     if (g_watchdog.triggered.load()) {
@@ -511,267 +625,84 @@ static void heartbeat_reply_internal() {
     }
 }
 
-static napi_value get_watchdog_state_internal(napi_env env) {
-    napi_value result;
-    napi_create_object(env, &result);
+Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    Napi::Object result = Napi::Object::New(env);
 
-    napi_value triggered, missedHeartbeats, started;
-    napi_get_boolean(env, g_watchdog.triggered.load(), &triggered);
-    napi_create_int32(env, g_watchdog.missed_heartbeats.load(), &missedHeartbeats);
-    napi_get_boolean(env, g_watchdog.started.load(), &started);
-
-    napi_set_named_property(env, result, "triggered", triggered);
-    napi_set_named_property(env, result, "missedHeartbeats", missedHeartbeats);
-    napi_set_named_property(env, result, "started", started);
-
+    result.Set("triggered", Napi::Boolean::New(env, g_watchdog.triggered.load()));
+    result.Set("missedHeartbeats", Napi::Number::New(env, g_watchdog.missed_heartbeats.load()));
+    result.Set("started", Napi::Boolean::New(env, g_watchdog.started.load()));
     return result;
 }
 
 
 // ============================================================
-// 纯 C N-API 导出函数（避免 Napi::CallbackInfo）
+// 纯 C N-API 模块注册（参考 V1.3 风格，能过 MSVC）
 // ============================================================
 
-static napi_value c_Initialize(napi_env env, napi_callback_info info) {
-    // 初始化 OpenSSL
-    init_openssl();
-
-    // 初始化时钟
-    {
-        std::lock_guard<std::mutex> lock(g_time_mutex);
-        if (!g_time_initialized) {
-            g_start_steady = std::chrono::steady_clock::now();
-            g_start_system_time = time(nullptr);
-            g_time_initialized = true;
-        }
-    }
-
-    time_t now = time(nullptr);
-    napi_value result;
-    napi_create_object(env, &result);
-
-    // 检查硬过期
-    if (now > HARD_EXPIRE) {
-        napi_value success, errorCode, timeTamperDetected;
-        napi_get_boolean(env, false, &success);
-        napi_create_int32(env, ERR_EXPIRED, &errorCode);
-        napi_get_boolean(env, false, &timeTamperDetected);
-        napi_set_named_property(env, result, "success", success);
-        napi_set_named_property(env, result, "errorCode", errorCode);
-        napi_set_named_property(env, result, "timeTamperDetected", timeTamperDetected);
-        return result;
-    }
-
-    // 检测时间回拨
-    bool time_tamper_detected = false;
-    {
-        std::lock_guard<std::mutex> lock(g_time_mutex);
-        if (g_time_initialized) {
-            auto elapsed = std::chrono::steady_clock::now() - g_start_steady;
-            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
-            time_t expected_now = g_start_system_time + elapsed_seconds;
-            if (now < expected_now - 5) {
-                time_tamper_detected = true;
-                write_watchdog_log("Time tamper detected: system time jumped backward");
-            }
-        }
-    }
-
-    napi_value success, errorCode, timeTamperDetected;
-    napi_get_boolean(env, true, &success);
-    napi_create_int32(env, SUCCESS, &errorCode);
-    napi_get_boolean(env, time_tamper_detected, &timeTamperDetected);
-    napi_set_named_property(env, result, "success", success);
-    napi_set_named_property(env, result, "errorCode", errorCode);
-    napi_set_named_property(env, result, "timeTamperDetected", timeTamperDetected);
-
-    return result;
+// 每个导出函数的纯 C 包装器
+static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = Initialize(cinfo);
+    return result.Value();
 }
 
-static napi_value c_DecryptAsset(napi_env env, napi_callback_info info) {
-    size_t argc = 1;
-    napi_value argv[1];
-    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
-
-    napi_value result;
-    napi_create_object(env, &result);
-
-    // 检查参数
-    if (argc < 1) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    bool is_buffer = false;
-    napi_is_buffer(env, argv[0], &is_buffer);
-    if (!is_buffer) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    // 获取 Buffer 数据
-    void* buffer_data = nullptr;
-    size_t data_size = 0;
-    napi_get_buffer_info(env, argv[0], &buffer_data, &data_size);
-
-    if (data_size < ASSET_HEADER_LEN) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    if (data_size > MAX_ASSET_SIZE) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_ASSET_TOO_LARGE, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    const uint8_t* input_data = reinterpret_cast<const uint8_t*>(buffer_data);
-
-    // 验证魔数
-    if (!constant_time_equals(input_data, MAGIC_BYTES, MAGIC_LEN)) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_INVALID_FORMAT, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    std::string iv(reinterpret_cast<const char*>(input_data + MAGIC_LEN), IV_LEN);
-    std::string stored_hmac(reinterpret_cast<const char*>(input_data + MAGIC_LEN + IV_LEN), HMAC_LEN);
-    std::string ciphertext(
-        reinterpret_cast<const char*>(input_data + ASSET_HEADER_LEN),
-        data_size - ASSET_HEADER_LEN);
-
-    std::string aes_key = derive_aes_key();
-    std::string hmac_key = derive_hmac_key();
-
-    if (aes_key.empty() || hmac_key.empty()) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_UNKNOWN, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    std::string computed_hmac = hmac_sha256(ciphertext, hmac_key);
-    if (computed_hmac.size() != HMAC_LEN ||
-        !constant_time_equals(
-            reinterpret_cast<const uint8_t*>(computed_hmac.data()),
-            reinterpret_cast<const uint8_t*>(stored_hmac.data()),
-            HMAC_LEN)) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, ERR_DECRYPT_HMAC, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    DecryptResult dec = aes_decrypt(ciphertext,
-        reinterpret_cast<const unsigned char*>(aes_key.c_str()), iv);
-
-    if (!dec.ok) {
-        napi_value ok, errCode, data;
-        napi_get_boolean(env, false, &ok);
-        napi_create_int32(env, dec.errCode, &errCode);
-        napi_create_buffer(env, 0, nullptr, &data);
-        napi_set_named_property(env, result, "ok", ok);
-        napi_set_named_property(env, result, "errCode", errCode);
-        napi_set_named_property(env, result, "data", data);
-        return result;
-    }
-
-    napi_value ok, errCode, outData;
-    napi_get_boolean(env, true, &ok);
-    napi_create_int32(env, SUCCESS, &errCode);
-    napi_create_buffer_copy(env, dec.data.size(), dec.data.c_str(), nullptr, &outData);
-    napi_set_named_property(env, result, "ok", ok);
-    napi_set_named_property(env, result, "errCode", errCode);
-    napi_set_named_property(env, result, "data", outData);
-
-    return result;
+static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = DecryptAsset(cinfo);
+    return result.Value();
 }
 
-static napi_value c_StartWatchdog(napi_env env, napi_callback_info info) {
-    start_watchdog_internal();
+static napi_value WrapStartWatchdog(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    StartWatchdog(cinfo);
     return nullptr;
 }
 
-static napi_value c_StopWatchdog(napi_env env, napi_callback_info info) {
-    stop_watchdog_internal();
+static napi_value WrapStopWatchdog(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    StopWatchdog(cinfo);
     return nullptr;
 }
 
-static napi_value c_HeartbeatReply(napi_env env, napi_callback_info info) {
-    heartbeat_reply_internal();
+static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    HeartbeatReply(cinfo);
     return nullptr;
 }
 
-static napi_value c_GetWatchdogState(napi_env env, napi_callback_info info) {
-    return get_watchdog_state_internal(env);
+static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = GetWatchdogState(cinfo);
+    return result.Value();
 }
 
-
-// ============================================================
-// Node-API 模块注册
-// ============================================================
-
+// Init 函数（纯 C N-API）
 static napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
 
     napi_create_function(env, "initialize", NAPI_AUTO_LENGTH,
-                         c_Initialize, nullptr, &fn);
+                         WrapInitialize, nullptr, &fn);
     napi_set_named_property(env, exports, "initialize", fn);
 
     napi_create_function(env, "decryptAsset", NAPI_AUTO_LENGTH,
-                         c_DecryptAsset, nullptr, &fn);
+                         WrapDecryptAsset, nullptr, &fn);
     napi_set_named_property(env, exports, "decryptAsset", fn);
 
     napi_create_function(env, "startWatchdog", NAPI_AUTO_LENGTH,
-                         c_StartWatchdog, nullptr, &fn);
+                         WrapStartWatchdog, nullptr, &fn);
     napi_set_named_property(env, exports, "startWatchdog", fn);
 
     napi_create_function(env, "stopWatchdog", NAPI_AUTO_LENGTH,
-                         c_StopWatchdog, nullptr, &fn);
+                         WrapStopWatchdog, nullptr, &fn);
     napi_set_named_property(env, exports, "stopWatchdog", fn);
 
     napi_create_function(env, "heartbeatReply", NAPI_AUTO_LENGTH,
-                         c_HeartbeatReply, nullptr, &fn);
+                         WrapHeartbeatReply, nullptr, &fn);
     napi_set_named_property(env, exports, "heartbeatReply", fn);
 
     napi_create_function(env, "getWatchdogState", NAPI_AUTO_LENGTH,
-                         c_GetWatchdogState, nullptr, &fn);
+                         WrapGetWatchdogState, nullptr, &fn);
     napi_set_named_property(env, exports, "getWatchdogState", fn);
 
     return exports;
