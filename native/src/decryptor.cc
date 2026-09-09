@@ -624,31 +624,19 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 纯 C N-API 模块注册（用 __pragma 禁用 C7624）
+// 纯 C N-API 模块注册（用 extern "C" 绕过 C7624）
 // ============================================================
 
+extern "C" {
+
 static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
-#ifdef _MSC_VER
-    #pragma warning(push)
-    #pragma warning(disable: 7624)
-#endif
     Napi::CallbackInfo cinfo(env, info);
-#ifdef _MSC_VER
-    #pragma warning(pop)
-#endif
     Napi::Object result = Initialize(cinfo);
     return result.Value();
 }
 
 static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
-#ifdef _MSC_VER
-    #pragma warning(push)
-    #pragma warning(disable: 7624)
-#endif
     Napi::CallbackInfo cinfo(env, info);
-#ifdef _MSC_VER
-    #pragma warning(pop)
-#endif
     Napi::Object result = DecryptAsset(cinfo);
     return result.Value();
 }
@@ -672,17 +660,12 @@ static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
 }
 
 static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
-#ifdef _MSC_VER
-    #pragma warning(push)
-    #pragma warning(disable: 7624)
-#endif
     Napi::CallbackInfo cinfo(env, info);
-#ifdef _MSC_VER
-    #pragma warning(pop)
-#endif
     Napi::Object result = GetWatchdogState(cinfo);
     return result.Value();
 }
+
+} // extern "C"
 
 static napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
