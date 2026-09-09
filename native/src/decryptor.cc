@@ -66,9 +66,8 @@
 #define WATCHDOG_MAX_MISS 2
 #endif
 
-// FIX 6: 降低素材大小上限到 50MB（原 200MB，防止 OOM）
 #ifndef MAX_ASSET_SIZE
-#define MAX_ASSET_SIZE (50 * 1024 * 1024)   // 50 MB
+#define MAX_ASSET_SIZE (50 * 1024 * 1024)
 #endif
 
 
@@ -110,7 +109,7 @@
 // 编译开关
 // ============================================================
 
-// #define WATCHDOG_LOGGING  // Release 版请注释掉
+// #define WATCHDOG_LOGGING
 
 
 // ============================================================
@@ -121,9 +120,8 @@ const size_t AES_KEY_LEN = 32;
 const size_t HMAC_LEN = 32;
 const size_t IV_LEN = 16;
 const size_t MAGIC_LEN = 8;
-const size_t ASSET_HEADER_LEN = MAGIC_LEN + IV_LEN + HMAC_LEN;  // 56 字节
+const size_t ASSET_HEADER_LEN = MAGIC_LEN + IV_LEN + HMAC_LEN;
 
-// FIX: 魔数常量（8 字节）
 const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
@@ -146,7 +144,7 @@ enum ErrorCode {
 
 
 // ============================================================
-// 全局状态（看门狗使用条件变量 + join 修复 P0）
+// 全局状态
 // ============================================================
 
 struct WatchdogState {
@@ -157,16 +155,14 @@ struct WatchdogState {
     std::atomic<bool> started{false};
     std::thread thread;
     std::mutex mutex;
-    std::condition_variable cv;   // FIX 1: 条件变量用于唤醒
+    std::condition_variable cv;
 } g_watchdog;
 
-// 单调时钟记录（检测系统时间回拨）
 std::chrono::steady_clock::time_point g_start_steady;
 time_t g_start_system_time = 0;
 std::mutex g_time_mutex;
 bool g_time_initialized = false;
 
-// OpenSSL 初始化（只执行一次）
 std::once_flag g_openssl_init_flag;
 
 
@@ -188,7 +184,7 @@ void write_watchdog_log(const std::string& msg) {
 
 
 // ============================================================
-// FIX 5: 固定时间 HMAC 比较（volatile 防编译器优化）
+// 固定时间 HMAC 比较
 // ============================================================
 
 static bool constant_time_equals(const uint8_t* a, const uint8_t* b, size_t n) {
@@ -217,7 +213,7 @@ std::string hmac_sha256(const std::string& data, const std::string& key) {
 
 
 // ============================================================
-// OpenSSL 初始化（只执行一次）
+// OpenSSL 初始化
 // ============================================================
 
 void init_openssl() {
@@ -230,14 +226,13 @@ void init_openssl() {
     });
 }
 
-// FIX 3: 统一清错误队列
 static void openssl_clear_err() {
     while (ERR_get_error() != 0) {}
 }
 
 
 // ============================================================
-// V2.1：密钥派生函数（AES 和 HMAC 分离）
+// V2.1：密钥派生函数
 // ============================================================
 
 std::string derive_aes_key() {
@@ -388,10 +383,9 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
 
 
 // ============================================================
-// 素材解密接口（核心）
+// 素材解密接口
 // ============================================================
 
-// 外部 Buffer finalize 回调（用于释放内存）
 static void finalize_external_buffer(napi_env env, void* data, void* hint) {
     if (data) {
         delete[] static_cast<char*>(data);
@@ -402,7 +396,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     Napi::Env env = info.Env();
     Napi::Object result = Napi::Object::New(env);
 
-    // 先清错误队列，防止脏数据
     openssl_clear_err();
 
     if (info.Length() < 1 || !info[0].IsBuffer()) {
@@ -431,7 +424,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     const uint8_t* data = reinterpret_cast<const uint8_t*>(encrypted_buf.Data());
 
-    // 验证魔数
     if (!constant_time_equals(data, MAGIC_BYTES, MAGIC_LEN)) {
         openssl_clear_err();
         result.Set("ok", Napi::Boolean::New(env, false));
@@ -481,7 +473,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // FIX 2: 改用外部 Buffer，避免内存拷贝
     char* data_ptr = new char[dec.data.size()];
     memcpy(data_ptr, dec.data.c_str(), dec.data.size());
     napi_value outData;
@@ -498,7 +489,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 启动初始化（含时间回拨检测）
+// 启动初始化
 // ============================================================
 
 Napi::Object Initialize(const Napi::CallbackInfo& info) {
@@ -516,8 +507,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // FIX 4: 如果第一次启动时系统时间严重偏差（比如早于 2000-01-01 或晚于 2040-01-01），直接拒绝
-    if (now < 946684800 || now > 2208988800) {  // 2000-01-01 ~ 2040-01-01
+    if (now < 946684800 || now > 2208988800) {
         result.Set("success", Napi::Boolean::New(env, false));
         result.Set("errorCode", Napi::Number::New(env, ERR_TIME_TAMPER));
         result.Set("timeTamperDetected", Napi::Boolean::New(env, true));
@@ -541,7 +531,6 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
             auto elapsed = std::chrono::steady_clock::now() - g_start_steady;
             auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
             time_t expected_now = g_start_system_time + elapsed_seconds;
-            // 容忍 5 秒误差
             if (now < expected_now - 5) {
                 time_tamper_detected = true;
                 write_watchdog_log("Time tamper detected: system time jumped backward");
@@ -558,7 +547,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 看门狗守护线程（修复 P0：条件变量 + join）
+// 看门狗
 // ============================================================
 
 void watchdog_thread_func() {
@@ -566,11 +555,9 @@ void watchdog_thread_func() {
     while (!g_watchdog.watchdog_exit.load()) {
         if (g_watchdog.cv.wait_for(lock, std::chrono::seconds(WATCHDOG_TIMEOUT_SEC),
             [&] { return g_watchdog.watchdog_exit.load(); })) {
-            // 被唤醒且 exit 为 true，直接退出
             break;
         }
 
-        // 正常超时逻辑
         if (g_watchdog.watchdog_exit.load()) break;
 
         if (!g_watchdog.heartbeat_received.load()) {
@@ -609,7 +596,6 @@ void StopWatchdog(const Napi::CallbackInfo& info) {
         g_watchdog.watchdog_exit.store(true);
         g_watchdog.cv.notify_all();
     }
-    // 等待线程真正退出
     if (g_watchdog.thread.joinable()) {
         g_watchdog.thread.join();
     }
@@ -638,18 +624,31 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 纯 C N-API 模块注册（参考 V1.3 风格，能过 MSVC）
+// 纯 C N-API 模块注册（用 __pragma 禁用 C7624）
 // ============================================================
 
-// 每个导出函数的纯 C 包装器
 static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
+#ifdef _MSC_VER
+    #pragma warning(push)
+    #pragma warning(disable: 7624)
+#endif
     Napi::CallbackInfo cinfo(env, info);
+#ifdef _MSC_VER
+    #pragma warning(pop)
+#endif
     Napi::Object result = Initialize(cinfo);
     return result.Value();
 }
 
 static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
+#ifdef _MSC_VER
+    #pragma warning(push)
+    #pragma warning(disable: 7624)
+#endif
     Napi::CallbackInfo cinfo(env, info);
+#ifdef _MSC_VER
+    #pragma warning(pop)
+#endif
     Napi::Object result = DecryptAsset(cinfo);
     return result.Value();
 }
@@ -673,12 +672,18 @@ static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
 }
 
 static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
+#ifdef _MSC_VER
+    #pragma warning(push)
+    #pragma warning(disable: 7624)
+#endif
     Napi::CallbackInfo cinfo(env, info);
+#ifdef _MSC_VER
+    #pragma warning(pop)
+#endif
     Napi::Object result = GetWatchdogState(cinfo);
     return result.Value();
 }
 
-// Init 函数（纯 C N-API）
 static napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
 
