@@ -624,7 +624,7 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 纯 C N-API 模块注册（用 extern "C" 绕过 C7624）
+// 纯 C N-API 模块注册
 // ============================================================
 
 extern "C" {
@@ -632,13 +632,13 @@ extern "C" {
 static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = Initialize(cinfo);
-    return result;   // 去掉 .Value()
+    return result;
 }
 
 static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = DecryptAsset(cinfo);
-    return result;   // 去掉 .Value()
+    return result;
 }
 
 static napi_value WrapStartWatchdog(napi_env env, napi_callback_info info) {
@@ -662,7 +662,7 @@ static napi_value WrapHeartbeatReply(napi_env env, napi_callback_info info) {
 static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = GetWatchdogState(cinfo);
-    return result;   // 去掉 .Value()
+    return result;
 }
 
 } // extern "C"
