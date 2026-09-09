@@ -135,6 +135,7 @@ enum ErrorCode {
     SUCCESS = 0,
     ERR_EXPIRED = 10,
     ERR_SIGNATURE = 30,
+    ERR_TIME_TAMPER = 31,
     ERR_NO_RES = 40,
     ERR_UNKNOWN = -1,
     ERR_DECRYPT_PADDING = 60,
