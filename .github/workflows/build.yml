@@ -86,7 +86,13 @@ jobs:
           cd native
 
           node-gyp configure --msvs_version=2022
-          node-gyp build --release --msvs_version=2022
+          node-gyp build --release --msvs_version=2022 `
+            -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
+            -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
+            -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
+            -DHARD_EXPIRE="${{ steps.expire.outputs.timestamp }}" `
+            -DWATCHDOG_TIMEOUT_SEC=10 `
+            -DWATCHDOG_MAX_MISS=2
         shell: powershell
 
       - name: 生成加密配置
@@ -102,8 +108,8 @@ jobs:
           [System.IO.File]::WriteAllText("encrypt_config.json", $json, $utf8NoBom)
         shell: powershell
 
-      - name: 生成作者密钥（纯英文，避免乱码）
-        run: |
+      - name: 生成作者密钥
+        run: |-
           $content = @"
           ============================================================
           Chronos Seal V2.1 - Author Secret Key
