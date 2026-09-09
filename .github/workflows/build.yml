@@ -109,7 +109,7 @@ jobs:
         shell: powershell
 
       - name: 生成作者密钥
-        run: |-
+        run: |
           $content = @"
           ============================================================
           Chronos Seal V2.1 - Author Secret Key
