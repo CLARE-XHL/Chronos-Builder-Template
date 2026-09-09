@@ -6,7 +6,16 @@
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")"
       ],
-      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"]
+      "libraries": [
+        "-lssl",
+        "-lcrypto"
+      ],
+      "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
+      "msvs_settings": {
+        "VCCLCompilerTool": {
+          "AdditionalOptions": ["/wd7624"]
+        }
+      }
     }
   ]
 }
