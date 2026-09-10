@@ -83,15 +83,17 @@ jobs:
             exit 1
           }
 
-          # 动态判断架构 (Node 的 ia32 对应 MSVC 的 x86)
+          # 动态判断架构
           if ("${{ github.event.inputs.engine_target }}" -eq "MV_32bit") {
             $arch = "ia32"
             $vsTarget = "x86"
-            $hostPath = "HostX64\x86" # 64位宿主环境编译32位目标
+            $hostPath = "HostX64\x86"
+            $targetArg = "--target=8.11.1" # ★ MV 专用：强制降级到 NW.js 0.29 对应的 Node 8.11.1
           } else {
             $arch = "x64"
             $vsTarget = "x64"
             $hostPath = "HostX64\x64"
+            $targetArg = "" # MZ 保持默认 (Node 18)
           }
 
           $env:VCINSTALLDIR = "$vspath\VC"
@@ -103,9 +105,8 @@ jobs:
 
           cd native
 
-          # 加上 --arch 参数，并将动态变量传入
-          node-gyp configure --msvs_version=2022 --arch=$arch
-          node-gyp build --release --msvs_version=2022 --arch=$arch `
+          node-gyp configure --msvs_version=2022 --arch=$arch $targetArg
+          node-gyp build --release --msvs_version=2022 --arch=$arch $targetArg `
             -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
             -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
             -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
@@ -171,7 +172,6 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          # 动态拼装产物名字，防止用户下错
           name: chronos-seal-output-${{ github.event.inputs.engine_target }}
           path: |
             native\build\Release\decryptor.node
