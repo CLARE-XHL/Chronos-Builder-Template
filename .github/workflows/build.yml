@@ -11,6 +11,13 @@ on:
         description: '游戏版本号（必填）'
         required: true
         type: string
+      engine_target:
+        description: '选择引擎架构 (MV是32位, MZ是64位)'
+        required: true
+        type: choice
+        options:
+          - MV_32bit
+          - MZ_64bit
       expiration_date:
         description: '截止日期（YYYY-MM-DD，留空永不过期）'
         required: false
@@ -76,17 +83,29 @@ jobs:
             exit 1
           }
 
+          # 动态判断架构 (Node 的 ia32 对应 MSVC 的 x86)
+          if ("${{ github.event.inputs.engine_target }}" -eq "MV_32bit") {
+            $arch = "ia32"
+            $vsTarget = "x86"
+            $hostPath = "HostX64\x86" # 64位宿主环境编译32位目标
+          } else {
+            $arch = "x64"
+            $vsTarget = "x64"
+            $hostPath = "HostX64\x64"
+          }
+
           $env:VCINSTALLDIR = "$vspath\VC"
           $env:VSINSTALLDIR = "$vspath"
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
-          $env:VSCMD_ARG_TGT_ARCH = "x64"
+          $env:VSCMD_ARG_TGT_ARCH = $vsTarget
           $env:VSCMD_ARG_HOST_ARCH = "x64"
-          $env:PATH += ";$($env:VCToolsInstallDir)\bin\HostX64\x64"
+          $env:PATH += ";$($env:VCToolsInstallDir)\bin\$hostPath"
 
           cd native
 
-          node-gyp configure --msvs_version=2022
-          node-gyp build --release --msvs_version=2022 `
+          # 加上 --arch 参数，并将动态变量传入
+          node-gyp configure --msvs_version=2022 --arch=$arch
+          node-gyp build --release --msvs_version=2022 --arch=$arch `
             -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
             -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
             -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
@@ -102,6 +121,7 @@ jobs:
             version = "${{ github.event.inputs.game_version }}"
             date = (Get-Date -Format "yyyy-MM-dd")
             seed = "${{ steps.gen.outputs.seed }}"
+            arch = "${{ github.event.inputs.engine_target }}"
           }
           $json = $config | ConvertTo-Json
           $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -116,6 +136,7 @@ jobs:
           WARNING: This file is the sole credential for game encryption. Keep it safe!
           Game Name:     ${{ github.event.inputs.game_name }}
           Version:       ${{ github.event.inputs.game_version }}
+          Engine Target: ${{ github.event.inputs.engine_target }}
           Release Date:  $(Get-Date -Format "yyyy-MM-dd")
           Expiration:    ${{ github.event.inputs.expiration_date }}
           Derivation Seed: ${{ steps.gen.outputs.seed }}
@@ -150,7 +171,8 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: chronos-seal-output
+          # 动态拼装产物名字，防止用户下错
+          name: chronos-seal-output-${{ github.event.inputs.engine_target }}
           path: |
             native\build\Release\decryptor.node
             encrypt_config.json
