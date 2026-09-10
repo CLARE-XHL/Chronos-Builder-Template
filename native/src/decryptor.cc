@@ -667,7 +667,8 @@ static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
 
 } // extern "C"
 
-static napi_value Init(napi_env env, napi_value exports) {
+// ★★★ 核心修复点：删掉 static，加上 extern "C" ★★★
+extern "C" napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
 
     napi_create_function(env, "initialize", NAPI_AUTO_LENGTH,
