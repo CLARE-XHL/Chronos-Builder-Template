@@ -83,17 +83,15 @@ jobs:
             exit 1
           }
 
-          # 动态判断架构
+          # 动态判断架构 (ia32 = 32位, x64 = 64位)
           if ("${{ github.event.inputs.engine_target }}" -eq "MV_32bit") {
             $arch = "ia32"
             $vsTarget = "x86"
             $hostPath = "HostX64\x86"
-            $targetArg = "--target=8.11.1" # ★ MV 专用：强制降级到 NW.js 0.29 对应的 Node 8.11.1
           } else {
             $arch = "x64"
             $vsTarget = "x64"
             $hostPath = "HostX64\x64"
-            $targetArg = "" # MZ 保持默认 (Node 18)
           }
 
           $env:VCINSTALLDIR = "$vspath\VC"
@@ -105,8 +103,9 @@ jobs:
 
           cd native
 
-          node-gyp configure --msvs_version=2022 --arch=$arch $targetArg
-          node-gyp build --release --msvs_version=2022 --arch=$arch $targetArg `
+          # 去掉了 --target 参数，使用 Node 18 原生的 N-API 3 做向下兼容
+          node-gyp configure --msvs_version=2022 --arch=$arch
+          node-gyp build --release --msvs_version=2022 --arch=$arch `
             -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
             -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
             -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
