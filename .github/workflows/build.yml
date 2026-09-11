@@ -45,8 +45,8 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: 安装 node-gyp
-        run: npm install -g node-gyp@9.4.0
+      - name: 安装 nw-gyp
+        run: npm install -g nw-gyp
         shell: powershell
 
       - name: 安装 node-addon-api
@@ -75,23 +75,22 @@ jobs:
           }
         shell: powershell
 
-      - name: 编译 decryptor.node
+      - name: 编译 decryptor.node (NW.js专版)
         run: |
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
-          if (-not $vspath) {
-            Write-Error "Visual Studio 2022 not found"
-            exit 1
-          }
+          if (-not $vspath) { Write-Error "Visual Studio 2022 not found"; exit 1 }
 
-          # 动态判断架构 (ia32 = 32位, x64 = 64位)
+          # ★ 根据引擎目标动态绑定架构和NW.js版本
           if ("${{ github.event.inputs.engine_target }}" -eq "MV_32bit") {
             $arch = "ia32"
             $vsTarget = "x86"
             $hostPath = "HostX64\x86"
+            $nwTarget = "0.29.0"   # RPG Maker MV 专用
           } else {
             $arch = "x64"
             $vsTarget = "x64"
             $hostPath = "HostX64\x64"
+            $nwTarget = "0.48.4"   # RPG Maker MZ 专用
           }
 
           $env:VCINSTALLDIR = "$vspath\VC"
@@ -103,9 +102,9 @@ jobs:
 
           cd native
 
-          # 去掉了 --target 参数，使用 Node 18 原生的 N-API 3 做向下兼容
-          node-gyp configure --msvs_version=2022 --arch=$arch
-          node-gyp build --release --msvs_version=2022 --arch=$arch `
+          # 使用 nw-gyp，根据目标版本编译
+          nw-gyp configure --target=$nwTarget --arch=$arch --msvs_version=2022
+          nw-gyp build --release --target=$nwTarget --arch=$arch --msvs_version=2022 `
             -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
             -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
             -DDERIVATION_SEED="${{ steps.gen.outputs.seed }}" `
