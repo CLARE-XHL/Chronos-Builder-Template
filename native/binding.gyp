@@ -9,7 +9,10 @@
       "defines": [
         "NAPI_DISABLE_CPP_EXCEPTIONS",
         "NAPI_VERSION=3"
-      ]
+      ],
+      "variables": {
+        "openssl_fips": ""
+      }
     }
   ]
 }
