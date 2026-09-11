@@ -49,8 +49,9 @@ jobs:
         run: npm install -g node-gyp@9.4.0
         shell: powershell
 
-      - name: 安装 node-addon-api
-        run: npm install node-addon-api
+      - name: 安装 node-addon-api (锁定版本)
+        # 配合 native/package.json 锁定为 3.2.1
+        run: npm install
         shell: powershell
         working-directory: native
 
@@ -90,16 +91,18 @@ jobs:
             $hostPath = "HostX64\x64"
           }
 
+          # ★ 动态获取最新的 MSVC 工具集版本号，彻底解决硬编码死锁
+          $msvcVersion = Get-ChildItem "$vspath\VC\Tools\MSVC" | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 | Select-Object -ExpandProperty Name
+          
           $env:VCINSTALLDIR = "$vspath\VC"
           $env:VSINSTALLDIR = "$vspath"
-          $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\14.44.35207"
+          $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\$msvcVersion"
           $env:VSCMD_ARG_TGT_ARCH = $vsTarget
           $env:VSCMD_ARG_HOST_ARCH = "x64"
           $env:PATH += ";$($env:VCToolsInstallDir)\bin\$hostPath"
 
           cd native
 
-          # ★ 核心改动：不再指定任何 --target，使用 Node 18 原生编译
           node-gyp configure --msvs_version=2022 --arch=$arch
           node-gyp build --release --msvs_version=2022 --arch=$arch `
             -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
