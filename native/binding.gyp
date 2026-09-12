@@ -9,6 +9,15 @@
       "defines": [
         "NAPI_DISABLE_CPP_EXCEPTIONS",
         "NAPI_VERSION=3"
+      ],
+      "conditions": [
+        ['OS=="win"', {
+          "msvs_settings": {
+            "VCLinkerTool": {
+              "AdditionalOptions": ["/EXPORT:napi_register_module_v1"]
+            }
+          }
+        }]
       ]
     }
   ]
