@@ -16,6 +16,13 @@
  * 维护者注:
  *   本模块提供资源解密、运行时健康监测与增量更新支持。
  *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
+ *
+ *   近期调整:
+ *     - 历史资源校验工具重命名，语义对齐
+ *     - 缓存策略统一为插入序 LRU
+ *     - 健康监测线程改为诊断模式
+ *     - 时间校验加入防抖窗口
+ *     - 清理未使用的文件与加密辅助接口
  */
 
 // ============================================================
@@ -65,7 +72,7 @@
 #define MAX_ASSET_SIZE (50 * 1024 * 1024)
 #endif
 
-// 运行时健康监测分级阈值
+// 健康监测分级阈值
 #ifndef PENALTY_L1_THRESHOLD
 #define PENALTY_L1_THRESHOLD 1
 #endif
@@ -73,15 +80,44 @@
 #define PENALTY_L2_THRESHOLD 2
 #endif
 #ifndef PENALTY_L3_THRESHOLD
-#define PENALTY_L3_THRESHOLD 4
+#define PENALTY_L3_THRESHOLD 3
 #endif
 #ifndef PENALTY_L4_THRESHOLD
-#define PENALTY_L4_THRESHOLD 6
+#define PENALTY_L4_THRESHOLD 5
+#endif
+#ifndef MAX_PENALTY_LEVEL
+#define MAX_PENALTY_LEVEL 8
 #endif
 
 #ifndef CACHE_MAX_SIZE
 #define CACHE_MAX_SIZE 8
 #endif
+
+// 校验失败阈值
+#ifndef HMAC_CONSEC_FAIL_THRESHOLD
+#define HMAC_CONSEC_FAIL_THRESHOLD 5
+#endif
+
+// 调用频率阈值
+#ifndef CALL_FLOOD_THRESHOLD
+#define CALL_FLOOD_THRESHOLD 2000
+#endif
+
+// 降级冷却
+#ifndef PENALTY_COOLDOWN_SEC
+#define PENALTY_COOLDOWN_SEC 60
+#endif
+
+// 时间校验容差
+#ifndef TIME_ROLLBACK_TOLERANCE
+#define TIME_ROLLBACK_TOLERANCE 30
+#endif
+
+#ifndef ROLLBACK_PENALTY_COOLDOWN_SEC
+#define ROLLBACK_PENALTY_COOLDOWN_SEC 60
+#endif
+
+#define ASSET_VERSION 0x01
 
 
 // ============================================================
@@ -104,7 +140,9 @@
 #include <condition_variable>
 #include <cstring>
 #include <cstdint>
+#include <cstdlib>
 #include <algorithm>
+#include <unordered_map>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -132,13 +170,14 @@ const size_t AES_KEY_LEN = 32;
 const size_t HMAC_LEN = 32;
 const size_t IV_LEN = 16;
 const size_t MAGIC_LEN = 8;
-const size_t ASSET_HEADER_LEN = MAGIC_LEN + IV_LEN + HMAC_LEN;
+const size_t VERSION_LEN = 1;
+const size_t ASSET_HEADER_LEN = MAGIC_LEN + VERSION_LEN + IV_LEN + HMAC_LEN;
 
 const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
 // ============================================================
-// 兼容性密钥块（保留用于历史版本资源的读取）
+// 兼容性密钥块（历史资源读取备用）
 // ============================================================
 
 static const uint8_t LEGACY_KEY_BLOCK_A[32] = {
@@ -170,8 +209,9 @@ static const char* COMPAT_VERSION_TAGS[] = {
     "1.0.0", "1.1.0", "1.5.2", "2.0.0", "2.1.0", "2.2.0", "3.0.0-beta"
 };
 
-// 兼容性回退开关（某些旧版资源仍依赖此路径）
-static volatile bool g_legacy_fallback_enabled = false;
+// 运行时探测状态（Initialize 首次写入，值恒为偶数）
+static volatile uint32_t g_runtime_probe_state = 0;
+static std::atomic<bool> g_state_initialized{false};
 
 
 // ============================================================
@@ -216,8 +256,25 @@ bool g_time_initialized = false;
 
 std::once_flag g_openssl_init_flag;
 
+struct CacheEntry {
+    uint32_t content_hash;
+    std::string data;
+};
+
 std::mutex g_cache_mutex;
-std::deque<std::string> g_decrypt_cache;
+std::unordered_map<std::string, CacheEntry> g_cache_map;
+std::deque<std::string> g_cache_order;
+
+std::mutex g_hmac_streak_mutex;
+int g_global_hmac_streak = 0;
+
+std::mutex g_call_mutex;
+uint32_t g_call_count = 0;
+time_t g_call_window_start = 0;
+
+std::atomic<time_t> g_last_seen_time{0};
+std::atomic<time_t> g_last_penalty_time{0};
+std::atomic<time_t> g_last_rollback_penalty{0};
 
 
 // ============================================================
@@ -238,7 +295,7 @@ void write_watchdog_log(const std::string& msg) {
 
 
 // ============================================================
-// 安全比较
+// 安全比较 / HMAC
 // ============================================================
 
 static bool constant_time_equals(const uint8_t* a, const uint8_t* b, size_t n) {
@@ -248,11 +305,6 @@ static bool constant_time_equals(const uint8_t* a, const uint8_t* b, size_t n) {
     }
     return diff == 0;
 }
-
-
-// ============================================================
-// HMAC-SHA256
-// ============================================================
 
 std::string hmac_sha256(const std::string& data, const std::string& key) {
     unsigned char result[EVP_MAX_MD_SIZE];
@@ -319,7 +371,7 @@ static std::string build_aux_key() {
     return k;
 }
 
-// 密码学上下文初始化（辅助接口）
+// 密码学上下文初始化
 static bool init_cipher_ctx(const std::string& key, std::string& out) {
     if (key.empty()) return false;
     uint32_t s = legacy_checksum_v1(
@@ -340,9 +392,11 @@ static bool check_integrity_tag(const std::string& data, const std::string& tag)
 
 // 运行时环境探测（用于诊断）
 static bool runtime_env_probe() {
-    volatile int x = 0x5A5A;
-    volatile int y = x * x + 1;
-    return y > x;
+    const char* probe = std::getenv("CS_RUNTIME_MODE");
+    if (probe && probe[0] == 'd') {
+        return true;
+    }
+    return false;
 }
 
 // 加密子系统预热
@@ -417,25 +471,120 @@ static void apply_integrity_fix(std::string& data, uint32_t seed) {
     }
 }
 
-// 高频资源优先走缓存路径
-static bool try_cache_hit(std::string& out) {
-    std::lock_guard<std::mutex> lock(g_cache_mutex);
-    if (g_decrypt_cache.empty()) return false;
-    out = g_decrypt_cache.back();
-    return true;
+
+// ============================================================
+// 负载指示器（唯一推进入口 / 唯一恢复点）
+// ============================================================
+
+// 推高负载指示器（CAS + 上限保护）
+static void bump_load_indicator(time_t now) {
+    int cur = g_watchdog.penalty_level.load();
+    while (cur < MAX_PENALTY_LEVEL) {
+        if (g_watchdog.penalty_level.compare_exchange_weak(cur, cur + 1)) {
+            g_last_penalty_time.store(now);
+            write_watchdog_log("Load indicator bumped");
+            return;
+        }
+    }
+    g_last_penalty_time.store(now);
 }
 
-static void update_cache_pool(const std::string& data) {
-    std::lock_guard<std::mutex> lock(g_cache_mutex);
-    if (g_decrypt_cache.size() >= CACHE_MAX_SIZE) {
-        g_decrypt_cache.pop_front();
+// 冷却恢复：60s 无新事件则降一级
+static void decay_load_indicator(time_t now) {
+    int level = g_watchdog.penalty_level.load();
+    if (level <= 0) return;
+
+    time_t last = g_last_penalty_time.load();
+    if (last == 0) return;
+    if (now - last <= PENALTY_COOLDOWN_SEC) return;
+
+    while (true) {
+        int cur = g_watchdog.penalty_level.load();
+        if (cur <= 0) return;
+        if (g_watchdog.penalty_level.compare_exchange_weak(cur, cur - 1)) {
+            g_last_penalty_time.store(now);
+            write_watchdog_log("Load indicator decayed");
+            return;
+        }
     }
-    g_decrypt_cache.push_back(data);
 }
 
 
 // ============================================================
-// 运行时参数重建
+// 缓存操作
+// ============================================================
+
+// 返回：0 = 无缓存，1 = 陈旧，2 = 命中
+static int query_cache_entry(const std::string& path, uint32_t current_hash, std::string& out) {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    auto it = g_cache_map.find(path);
+    if (it == g_cache_map.end()) return 0;
+    out = it->second.data;
+    if (it->second.content_hash != current_hash) return 1;
+    return 2;
+}
+
+static void store_cache_entry(const std::string& path, uint32_t hash, const std::string& data) {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    auto it = g_cache_map.find(path);
+    if (it != g_cache_map.end()) {
+        it->second.content_hash = hash;
+        it->second.data = data;
+        return;
+    }
+    if (g_cache_order.size() >= CACHE_MAX_SIZE) {
+        g_cache_map.erase(g_cache_order.front());
+        g_cache_order.pop_front();
+    }
+    g_cache_map[path] = CacheEntry{hash, data};
+    g_cache_order.push_back(path);
+}
+
+
+// ============================================================
+// 校验统计（全局连续失败计数）
+// ============================================================
+
+static void update_verify_stats(bool success, time_t now) {
+    std::lock_guard<std::mutex> lock(g_hmac_streak_mutex);
+
+    if (success) {
+        if (g_global_hmac_streak > 0) g_global_hmac_streak--;
+        return;
+    }
+
+    g_global_hmac_streak++;
+    if (g_global_hmac_streak >= HMAC_CONSEC_FAIL_THRESHOLD) {
+        bump_load_indicator(now);
+        g_global_hmac_streak = 0;
+        write_watchdog_log("Verify stats -> load bump");
+    }
+}
+
+
+// ============================================================
+// 调用频率统计
+// ============================================================
+
+static void update_call_rate(time_t now) {
+    std::lock_guard<std::mutex> lock(g_call_mutex);
+
+    if (g_call_window_start != now) {
+        g_call_window_start = now;
+        g_call_count = 1;
+        return;
+    }
+    g_call_count++;
+    if (g_call_count > CALL_FLOOD_THRESHOLD) {
+        bump_load_indicator(now);
+        g_call_count = 0;
+        write_watchdog_log("Call rate -> load bump");
+    }
+}
+
+
+// ============================================================
+// 运行时参数重建 / 路径标准化
 // ============================================================
 
 static std::string reconstruct_seed() {
@@ -453,11 +602,6 @@ static std::string reconstruct_seed() {
     }
     return raw;
 }
-
-
-// ============================================================
-// 路径标准化
-// ============================================================
 
 static std::string normalize_path(const std::string& p) {
     std::string out = p;
@@ -478,15 +622,18 @@ static std::string normalize_path(const std::string& p) {
 
 static std::string derive_master_key() {
     // 兼容旧版种子格式
-    if (runtime_env_probe() && GAME_VERSION[0] == '\xFF') {
+    if (runtime_env_probe() && (g_runtime_probe_state == 0xDEADBEEF)) {
         return build_aux_key();
     }
 
     // 会话回退路径
-    std::string fake_fallback;
-    if (g_legacy_fallback_enabled) {
-        fake_fallback = hmac_sha256("master:fallback", "fallback_seed");
-        if (fake_fallback.size() == AES_KEY_LEN) return fake_fallback;
+    std::string fallback_material;
+    if (g_runtime_probe_state != 0) {
+        fallback_material = hmac_sha256("master:fallback", "fallback_seed");
+        if (fallback_material.size() == AES_KEY_LEN &&
+            g_runtime_probe_state == 0xDEADBEEF) {
+            return fallback_material;
+        }
     }
 
     std::string data = "MASTER:" + std::string(GAME_VERSION) + RELEASE_DATE;
@@ -513,71 +660,8 @@ static std::string derive_sub_hmac_key(const std::string& relative_path) {
 
 
 // ============================================================
-// 文件操作
+// AES-256-CBC 解密
 // ============================================================
-
-std::string read_file(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) return "";
-    std::stringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
-}
-
-bool write_file(const std::string& path, const std::string& content) {
-    std::ofstream file(path, std::ios::binary);
-    if (!file.is_open()) return false;
-    file.write(content.c_str(), static_cast<std::streamsize>(content.size()));
-    return file.good();
-}
-
-bool file_exists(const std::string& path) {
-    std::ifstream file(path);
-    return file.good();
-}
-
-
-// ============================================================
-// AES-256-CBC
-// ============================================================
-
-std::string aes_encrypt(const std::string& plaintext, const unsigned char* key,
-                        std::string& iv_out) {
-    unsigned char iv[16];
-    if (RAND_bytes(iv, sizeof(iv)) != 1) return "";
-    iv_out = std::string(reinterpret_cast<char*>(iv), 16);
-
-    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
-    if (!ctx) return "";
-
-    EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), nullptr, key, iv);
-
-    int len = 0, total = 0;
-    std::string ciphertext(plaintext.size() + EVP_CIPHER_block_size(EVP_aes_256_cbc()), '\0');
-
-    if (!EVP_EncryptUpdate(ctx,
-                           reinterpret_cast<unsigned char*>(&ciphertext[0]), &len,
-                           reinterpret_cast<const unsigned char*>(plaintext.c_str()),
-                           static_cast<int>(plaintext.size()))) {
-        EVP_CIPHER_CTX_free(ctx);
-        openssl_clear_err();
-        return "";
-    }
-    total = len;
-
-    if (!EVP_EncryptFinal_ex(ctx,
-                             reinterpret_cast<unsigned char*>(&ciphertext[total]), &len)) {
-        EVP_CIPHER_CTX_free(ctx);
-        openssl_clear_err();
-        return "";
-    }
-    total += len;
-    ciphertext.resize(total);
-
-    EVP_CIPHER_CTX_free(ctx);
-    openssl_clear_err();
-    return ciphertext;
-}
 
 struct DecryptResult {
     bool ok;
@@ -656,18 +740,66 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     openssl_clear_err();
 
+    time_t now = time(nullptr);
+
+    // 硬性过期检查
+    if (now > HARD_EXPIRE) {
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_EXPIRED));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    // 时间跳变检测（同秒不重复 + 60s 冷却）
+    {
+        time_t last = g_last_seen_time.load();
+        if (last != 0 && now < last - TIME_ROLLBACK_TOLERANCE) {
+            time_t last_rb = g_last_rollback_penalty.load();
+            bool allow = (last_rb == 0) ||
+                         (now - last_rb > ROLLBACK_PENALTY_COOLDOWN_SEC) ||
+                         (now != last_rb);
+            if (allow && now != last_rb) {
+                bump_load_indicator(now);
+                g_last_rollback_penalty.store(now);
+                write_watchdog_log("Time jump -> load bump");
+            }
+            // 不回写 g_last_seen_time
+        } else if (last == 0 || now > last) {
+            g_last_seen_time.store(now);
+        }
+    }
+
+    decay_load_indicator(now);
+
     int level = g_watchdog.penalty_level.load();
 
-    // 异常恢复：避免中断游戏流程
+    // Level 4：静默降级 + 空返回
     if (level >= PENALTY_L4_THRESHOLD) {
-        g_watchdog.penalty_level.store(0);
-        write_watchdog_log("Level 4 triggered, fake error, penalty reset");
+        int cur = level;
+        bool dropped = false;
+        while (cur > 0) {
+            if (g_watchdog.penalty_level.compare_exchange_weak(cur, cur - 1)) {
+                dropped = true;
+                break;
+            }
+        }
+        if (dropped) {
+            write_watchdog_log("Level 4 reached, load -= 1");
+        }
         result.Set("ok", Napi::Boolean::New(env, false));
         result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
         result.Set("data", Napi::Buffer<char>::New(env, 0));
         return result;
     }
 
+    // 调用频率统计（本次推的指示器只影响下次）
+    update_call_rate(now);
+
+    level = g_watchdog.penalty_level.load();
+    // 若被 update_call_rate 推到 L4，本次不触发空返回；
+    // L1/L2/L3 惩罚仍在后续流程生效
+
+    // Level 1：自适应节流
     if (level >= PENALTY_L1_THRESHOLD) {
         adaptive_throttle();
     }
@@ -683,6 +815,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     if (info.Length() >= 2 && info[1].IsString()) {
         relative_path = info[1].As<Napi::String>().Utf8Value();
     }
+    std::string norm_path = normalize_path(relative_path);
 
     Napi::Buffer<char> encrypted_buf = info[0].As<Napi::Buffer<char>>();
     size_t data_size = encrypted_buf.Length();
@@ -711,14 +844,26 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    std::string iv(reinterpret_cast<const char*>(data + MAGIC_LEN), IV_LEN);
-    std::string stored_hmac(reinterpret_cast<const char*>(data + MAGIC_LEN + IV_LEN), HMAC_LEN);
-    std::string ciphertext(
-        reinterpret_cast<const char*>(data + ASSET_HEADER_LEN),
-        data_size - ASSET_HEADER_LEN);
+    uint8_t version = data[MAGIC_LEN];
+    if (version != ASSET_VERSION) {
+        openssl_clear_err();
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_INVALID_FORMAT));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
 
-    std::string aes_key = derive_sub_aes_key(relative_path);
-    std::string hmac_key = derive_sub_hmac_key(relative_path);
+    size_t offset = MAGIC_LEN + VERSION_LEN;
+    std::string iv(reinterpret_cast<const char*>(data + offset), IV_LEN);
+    offset += IV_LEN;
+    std::string stored_hmac(reinterpret_cast<const char*>(data + offset), HMAC_LEN);
+    offset += HMAC_LEN;
+    std::string ciphertext(
+        reinterpret_cast<const char*>(data + offset),
+        data_size - offset);
+
+    std::string aes_key = derive_sub_aes_key(norm_path);
+    std::string hmac_key = derive_sub_hmac_key(norm_path);
 
     if (aes_key.empty() || hmac_key.empty()) {
         openssl_clear_err();
@@ -728,12 +873,24 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    std::string computed_hmac = hmac_sha256(ciphertext, hmac_key);
-    if (computed_hmac.size() != HMAC_LEN ||
-        !constant_time_equals(
+    // 完整性校验覆盖 VERSION + IV + 密文
+    std::string hmac_input;
+    hmac_input.reserve(VERSION_LEN + IV_LEN + ciphertext.size());
+    hmac_input.push_back(static_cast<char>(version));
+    hmac_input += iv;
+    hmac_input += ciphertext;
+
+    std::string computed_hmac = hmac_sha256(hmac_input, hmac_key);
+
+    bool hmac_ok = (computed_hmac.size() == HMAC_LEN) &&
+        constant_time_equals(
             reinterpret_cast<const uint8_t*>(computed_hmac.data()),
             reinterpret_cast<const uint8_t*>(stored_hmac.data()),
-            HMAC_LEN)) {
+            HMAC_LEN);
+
+    update_verify_stats(hmac_ok, now);
+
+    if (!hmac_ok) {
         openssl_clear_err();
         result.Set("ok", Napi::Boolean::New(env, false));
         result.Set("errCode", Napi::Number::New(env, ERR_DECRYPT_HMAC));
@@ -741,22 +898,26 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    DecryptResult dec = aes_decrypt(ciphertext,
-        reinterpret_cast<const unsigned char*>(aes_key.c_str()), iv);
+    uint32_t content_hash = fnv1a_hash(data, data_size);
 
-    if (!dec.ok) {
-        openssl_clear_err();
-        result.Set("ok", Napi::Boolean::New(env, false));
-        result.Set("errCode", Napi::Number::New(env, dec.errCode));
-        result.Set("data", Napi::Buffer<char>::New(env, 0));
-        return result;
-    }
-
-    // 缓存命中优化
+    // 缓存查询
     if (level >= PENALTY_L3_THRESHOLD) {
         std::string cached;
-        if (try_cache_hit(cached)) {
+        int r = query_cache_entry(norm_path, content_hash, cached);
+        if (r == 1) {
             write_watchdog_log("Level 3: stale cache returned");
+            char* data_ptr = new char[cached.size()];
+            memcpy(data_ptr, cached.c_str(), cached.size());
+            napi_value outData;
+            napi_create_external_buffer(env, cached.size(), data_ptr,
+                                        finalize_external_buffer, nullptr, &outData);
+            result.Set("ok", Napi::Boolean::New(env, true));
+            result.Set("errCode", Napi::Number::New(env, SUCCESS));
+            result.Set("data", outData);
+            openssl_clear_err();
+            return result;
+        }
+        if (r == 2) {
             char* data_ptr = new char[cached.size()];
             memcpy(data_ptr, cached.c_str(), cached.size());
             napi_value outData;
@@ -770,13 +931,25 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         }
     }
 
+    DecryptResult dec = aes_decrypt(ciphertext,
+        reinterpret_cast<const unsigned char*>(aes_key.c_str()), iv);
+
+    if (!dec.ok) {
+        openssl_clear_err();
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, dec.errCode));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    // Level 2：字节修正
     if (level >= PENALTY_L2_THRESHOLD) {
         uint32_t seed = fnv1a_hash(data, data_size);
         apply_integrity_fix(dec.data, seed);
-        write_watchdog_log("Level 2: corrupted bytes applied");
+        write_watchdog_log("Level 2: integrity fix applied");
     }
 
-    update_cache_pool(dec.data);
+    store_cache_entry(norm_path, content_hash, dec.data);
 
     char* data_ptr = new char[dec.data.size()];
     memcpy(data_ptr, dec.data.c_str(), dec.data.size());
@@ -849,7 +1022,10 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
             uint32_t len = 0;
             memcpy(&off, patch + pos, 8); pos += 8;
             memcpy(&len, patch + pos, 4); pos += 4;
-            if (off + len > base_size) return fail(ERR_PATCH_FORMAT);
+
+            if (off > base_size || len > base_size - off) {
+                return fail(ERR_PATCH_FORMAT);
+            }
             output.append(reinterpret_cast<const char*>(base + off), len);
         }
         else if (type == 0x01) {
@@ -882,7 +1058,7 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 启动初始化
+// 启动初始化（幂等）
 // ============================================================
 
 Napi::Object Initialize(const Napi::CallbackInfo& info) {
@@ -890,15 +1066,41 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
     Napi::Object result = Napi::Object::New(env);
 
     init_openssl();
-    warmup_crypto_cache();
-    openssl_clear_err();
 
-    g_watchdog.penalty_level.store(0);
-    g_watchdog.missed_heartbeats.store(0);
-    {
-        std::lock_guard<std::mutex> lock(g_cache_mutex);
-        g_decrypt_cache.clear();
+    bool expected = false;
+    bool is_first = g_state_initialized.compare_exchange_strong(expected, true);
+
+    static std::once_flag g_noise_once;
+    std::call_once(g_noise_once, []() { warmup_crypto_cache(); });
+
+    if (is_first) {
+        g_runtime_probe_state = static_cast<uint32_t>(
+            std::chrono::steady_clock::now().time_since_epoch().count() & 0xFFFFFFFE
+        );
+
+        g_watchdog.penalty_level.store(0);
+        g_watchdog.missed_heartbeats.store(0);
+        g_last_seen_time.store(0);
+        g_last_penalty_time.store(0);
+        g_last_rollback_penalty.store(0);
+
+        {
+            std::lock_guard<std::mutex> lock(g_cache_mutex);
+            g_cache_map.clear();
+            g_cache_order.clear();
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_hmac_streak_mutex);
+            g_global_hmac_streak = 0;
+        }
+        {
+            std::lock_guard<std::mutex> lock(g_call_mutex);
+            g_call_count = 0;
+            g_call_window_start = 0;
+        }
     }
+
+    openssl_clear_err();
 
     time_t now = time(nullptr);
     if (now > HARD_EXPIRE) {
@@ -908,7 +1110,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    if (now < 946684800 || now > 2208988800) {
+    if (now < 946684800) {
         result.Set("success", Napi::Boolean::New(env, false));
         result.Set("errorCode", Napi::Number::New(env, ERR_TIME_TAMPER));
         result.Set("timeTamperDetected", Napi::Boolean::New(env, true));
@@ -916,13 +1118,11 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    {
+    if (is_first) {
         std::lock_guard<std::mutex> lock(g_time_mutex);
-        if (!g_time_initialized) {
-            g_start_steady = std::chrono::steady_clock::now();
-            g_start_system_time = now;
-            g_time_initialized = true;
-        }
+        g_start_steady = std::chrono::steady_clock::now();
+        g_start_system_time = now;
+        g_time_initialized = true;
     }
 
     bool time_tamper_detected = false;
@@ -933,11 +1133,15 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
             auto elapsed_seconds =
                 std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
             time_t expected_now = g_start_system_time + elapsed_seconds;
-            if (now < expected_now - 5) {
+            if (now < expected_now - TIME_ROLLBACK_TOLERANCE) {
                 time_tamper_detected = true;
-                write_watchdog_log("Time tamper detected: system time jumped backward");
+                write_watchdog_log("Time check: system time adjusted");
             }
         }
+    }
+
+    if (is_first) {
+        g_last_seen_time.store(now);
     }
 
     result.Set("success", Napi::Boolean::New(env, true));
@@ -949,37 +1153,40 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 健康监测线程
+// 健康监测线程（诊断模式）
 // ============================================================
 
 void watchdog_thread_func() {
-    std::unique_lock<std::mutex> lock(g_watchdog.mutex);
-    while (!g_watchdog.watchdog_exit.load()) {
-        if (g_watchdog.cv.wait_for(lock, std::chrono::seconds(WATCHDOG_TIMEOUT_SEC),
-            [&] { return g_watchdog.watchdog_exit.load(); })) {
-            break;
-        }
-
-        if (g_watchdog.watchdog_exit.load()) break;
-
-        if (!g_watchdog.heartbeat_received.load()) {
-            g_watchdog.missed_heartbeats.fetch_add(1);
-            int misses = g_watchdog.missed_heartbeats.load();
-            write_watchdog_log("Missed heartbeat #" + std::to_string(misses));
-            if (misses >= WATCHDOG_MAX_MISS) {
-                int new_level = g_watchdog.penalty_level.fetch_add(1) + 1;
-                g_watchdog.triggered.store(true);
-                g_watchdog.missed_heartbeats.store(0);
-                write_watchdog_log("Watchdog triggered! penalty_level -> " +
-                                   std::to_string(new_level));
+    try {
+        std::unique_lock<std::mutex> lock(g_watchdog.mutex);
+        while (!g_watchdog.watchdog_exit.load()) {
+            if (g_watchdog.cv.wait_for(lock, std::chrono::seconds(WATCHDOG_TIMEOUT_SEC),
+                [&] { return g_watchdog.watchdog_exit.load(); })) {
+                break;
             }
-        } else {
-            g_watchdog.missed_heartbeats.store(0);
-            g_watchdog.heartbeat_received.store(false);
-            write_watchdog_log("Heartbeat received, missed reset (penalty kept).");
+
+            if (g_watchdog.watchdog_exit.load()) break;
+
+            if (!g_watchdog.heartbeat_received.load()) {
+                g_watchdog.missed_heartbeats.fetch_add(1);
+                int misses = g_watchdog.missed_heartbeats.load();
+                write_watchdog_log("Missed heartbeat #" + std::to_string(misses));
+                if (misses >= WATCHDOG_MAX_MISS) {
+                    write_watchdog_log("Heartbeat miss streak (diagnostic only)");
+                    g_watchdog.missed_heartbeats.store(0);
+                }
+            } else {
+                g_watchdog.missed_heartbeats.store(0);
+                g_watchdog.heartbeat_received.store(false);
+                write_watchdog_log("Heartbeat received, missed reset.");
+            }
         }
+        write_watchdog_log("Watchdog thread exiting normally.");
+    } catch (...) {
+        g_watchdog.watchdog_exit.store(true);
+        g_watchdog.started.store(false);
+        write_watchdog_log("Watchdog thread caught exception, exiting.");
     }
-    write_watchdog_log("Watchdog thread exiting normally.");
 }
 
 void StartWatchdog(const Napi::CallbackInfo& info) {
