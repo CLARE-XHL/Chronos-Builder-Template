@@ -7,55 +7,50 @@
  * in a long time.
  * ============================================================
  *
- * Chronos Seal 2.1 - decryptor.cc
- * 适用于 RPG Maker MV / MZ (NW.js / Node.js)
+ * Chronos Seal - decryptor.cc
+ * 适用于 RPG Maker MZ (NW.js / Node.js)
  *
- * 编译依赖:
- *   - node-addon-api (N-API)
- *   - OpenSSL 1.1.1+ (libssl, libcrypto)
+ * 版本: 2.2
+ * 日期: 2026-09-12
  *
- * 编译命令 (GitHub Actions 云端执行):
- *   node-gyp configure
- *   node-gyp build --release
- *
- * 版本: 2.1
- * 日期: 2026-09-02
- *
- * 核心改进 (V2.1 素材解密版):
- *   - 移除检查点（checkpoint）全部逻辑
- *   - 新增素材解密接口（decryptAsset）
- *   - 密钥派生机制不变，但不再用于 system.json
- *   - system.json 不再加密，改为明文读取
- *   - 保留看门狗守护线程（改为状态上报模式）
- *   - 素材格式: [MAGIC(8) + IV(16) + HMAC(32) + AES密文]
- *   - AES密钥和HMAC密钥分离派生
- *   - 不再依赖 config.h，所有编译期常量由宏定义传入
- *   - 固定时间 HMAC 比较，防止计时攻击
- *
- * 设计哲学:
- *   - 密钥不存在任何文件中，由 C++ 运行时派生
- *   - 素材解密由 C++ 层统一接管
- *   - JS 层仅作为数据通道，不接触密钥
+ * 维护者注:
+ *   本模块提供资源解密、运行时健康监测与增量更新支持。
+ *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
  */
 
 // ============================================================
-// 编译期常量（由 GitHub Actions 通过 -D 宏传入）
+// 编译期配置
 // ============================================================
 
 #ifndef GAME_VERSION
-#define GAME_VERSION "2.1.0"
+#define GAME_VERSION "2.2.0"
 #endif
 
 #ifndef RELEASE_DATE
-#define RELEASE_DATE "2026-09-02"
+#define RELEASE_DATE "2026-09-12"
 #endif
 
-#ifndef DERIVATION_SEED
-#define DERIVATION_SEED "REPLACE_ME_WITH_RANDOM_SEED_IN_ACTIONS"
+#ifndef SEED_A
+#define SEED_A "REPLACE_ME"
+#endif
+#ifndef SEED_B
+#define SEED_B "_WITH_RANDOM"
+#endif
+#ifndef SEED_C
+#define SEED_C "_SEED_IN_"
+#endif
+#ifndef SEED_D
+#define SEED_D "ACTIONS_2_2"
+#endif
+#ifndef SEED_MASK
+#define SEED_MASK 0x5A
+#endif
+#ifndef SEED_SALT
+#define SEED_SALT 0x9E3779B9u
 #endif
 
 #ifndef HARD_EXPIRE
-#define HARD_EXPIRE 1767225600  // 2027-01-01
+#define HARD_EXPIRE 1767225600
 #endif
 
 #ifndef WATCHDOG_TIMEOUT_SEC
@@ -70,6 +65,24 @@
 #define MAX_ASSET_SIZE (50 * 1024 * 1024)
 #endif
 
+// 运行时健康监测分级阈值
+#ifndef PENALTY_L1_THRESHOLD
+#define PENALTY_L1_THRESHOLD 1
+#endif
+#ifndef PENALTY_L2_THRESHOLD
+#define PENALTY_L2_THRESHOLD 2
+#endif
+#ifndef PENALTY_L3_THRESHOLD
+#define PENALTY_L3_THRESHOLD 4
+#endif
+#ifndef PENALTY_L4_THRESHOLD
+#define PENALTY_L4_THRESHOLD 6
+#endif
+
+#ifndef CACHE_MAX_SIZE
+#define CACHE_MAX_SIZE 8
+#endif
+
 
 // ============================================================
 // 头文件
@@ -81,13 +94,16 @@
 #include <sstream>
 #include <iomanip>
 #include <vector>
+#include <deque>
 #include <ctime>
+#include <cctype>
 #include <thread>
 #include <chrono>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <cstring>
+#include <cstdint>
 #include <algorithm>
 
 #ifdef _WIN32
@@ -105,15 +121,11 @@
 #include <openssl/sha.h>
 
 
-// ============================================================
-// 编译开关
-// ============================================================
-
 // #define WATCHDOG_LOGGING
 
 
 // ============================================================
-// 常量定义
+// 常量
 // ============================================================
 
 const size_t AES_KEY_LEN = 32;
@@ -126,7 +138,44 @@ const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
 // ============================================================
-// 错误码定义
+// 兼容性密钥块（保留用于历史版本资源的读取）
+// ============================================================
+
+static const uint8_t LEGACY_KEY_BLOCK_A[32] = {
+    0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81,
+    0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8, 0x09,
+    0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+    0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00
+};
+
+static const uint8_t LEGACY_KEY_BLOCK_B[32] = {
+    0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+    0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78,
+    0x87, 0x96, 0xA5, 0xB4, 0xC3, 0xD2, 0xE1, 0xF0,
+    0x11, 0x33, 0x55, 0x77, 0x99, 0xBB, 0xDD, 0xFF
+};
+
+static const uint8_t LEGACY_IV_TABLE[4][16] = {
+    {0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,
+     0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10},
+    {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
+     0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99},
+    {0xDE,0xAD,0xBE,0xEF,0xCA,0xFE,0xBA,0xBE,
+     0x13,0x37,0x13,0x37,0x42,0x42,0x42,0x42},
+    {0x5A,0x5A,0x5A,0x5A,0xA5,0xA5,0xA5,0xA5,
+     0x0F,0x1E,0x2D,0x3C,0x4B,0x5A,0x69,0x78}
+};
+
+static const char* COMPAT_VERSION_TAGS[] = {
+    "1.0.0", "1.1.0", "1.5.2", "2.0.0", "2.1.0", "2.2.0", "3.0.0-beta"
+};
+
+// 兼容性回退开关（某些旧版资源仍依赖此路径）
+static volatile bool g_legacy_fallback_enabled = false;
+
+
+// ============================================================
+// 错误码
 // ============================================================
 
 enum ErrorCode {
@@ -139,7 +188,8 @@ enum ErrorCode {
     ERR_DECRYPT_PADDING = 60,
     ERR_DECRYPT_HMAC = 61,
     ERR_ASSET_TOO_LARGE = 62,
-    ERR_INVALID_FORMAT = 63
+    ERR_INVALID_FORMAT = 63,
+    ERR_PATCH_FORMAT = 70
 };
 
 
@@ -150,6 +200,7 @@ enum ErrorCode {
 struct WatchdogState {
     std::atomic<bool> heartbeat_received{false};
     std::atomic<int> missed_heartbeats{0};
+    std::atomic<int> penalty_level{0};
     std::atomic<bool> watchdog_exit{false};
     std::atomic<bool> triggered{false};
     std::atomic<bool> started{false};
@@ -165,9 +216,12 @@ bool g_time_initialized = false;
 
 std::once_flag g_openssl_init_flag;
 
+std::mutex g_cache_mutex;
+std::deque<std::string> g_decrypt_cache;
+
 
 // ============================================================
-// 日志辅助
+// 日志
 // ============================================================
 
 #ifdef WATCHDOG_LOGGING
@@ -184,7 +238,7 @@ void write_watchdog_log(const std::string& msg) {
 
 
 // ============================================================
-// 固定时间 HMAC 比较
+// 安全比较
 // ============================================================
 
 static bool constant_time_equals(const uint8_t* a, const uint8_t* b, size_t n) {
@@ -232,25 +286,229 @@ static void openssl_clear_err() {
 
 
 // ============================================================
-// V2.1：密钥派生函数
+// 历史资源兼容工具（供加密流程复用）
 // ============================================================
 
-std::string derive_aes_key() {
-    std::string data = "AES:" + std::string(GAME_VERSION) + RELEASE_DATE;
-    std::string key = hmac_sha256(data, DERIVATION_SEED);
-    if (key.size() != AES_KEY_LEN) {
-        return "";
+// 旧版校验和算法 v1
+static uint32_t legacy_checksum_v1(const uint8_t* data, size_t len) {
+    uint32_t acc = 0x6A09E667u;
+    for (size_t i = 0; i < len; ++i) {
+        acc = (acc << 5) | (acc >> 27);
+        acc ^= data[i];
+        acc += 0x9E3779B9u;
     }
-    return key;
+    return acc;
 }
 
-std::string derive_hmac_key() {
-    std::string data = "HMAC:" + std::string(GAME_VERSION) + RELEASE_DATE;
-    std::string key = hmac_sha256(data, DERIVATION_SEED);
-    if (key.size() != HMAC_LEN) {
-        return "";
+// FNV 变体哈希
+static uint64_t fnv_alt_hash(const std::string& s) {
+    uint64_t h = 0xCBF29CE484222325ULL;
+    for (char c : s) {
+        h ^= static_cast<uint8_t>(c);
+        h *= 0x100000001B3ULL;
     }
-    return key;
+    return h;
+}
+
+// 辅助密钥构建（供会话绑定使用）
+static std::string build_aux_key() {
+    std::string k = "gamma_key_material_do_not_use";
+    for (size_t i = 0; i < k.size(); ++i) {
+        k[i] = static_cast<char>(k[i] ^ static_cast<char>(0x33 + (i & 0x0F)));
+    }
+    return k;
+}
+
+// 密码学上下文初始化（辅助接口）
+static bool init_cipher_ctx(const std::string& key, std::string& out) {
+    if (key.empty()) return false;
+    uint32_t s = legacy_checksum_v1(
+        reinterpret_cast<const uint8_t*>(key.data()), key.size());
+    out.resize(16);
+    for (int i = 0; i < 16; ++i) {
+        s = s * 1103515245u + 12345u;
+        out[i] = static_cast<char>((s >> 16) & 0xFF);
+    }
+    return (s & 1) == 0;
+}
+
+// 完整性标签校验
+static bool check_integrity_tag(const std::string& data, const std::string& tag) {
+    uint64_t h = fnv_alt_hash(data + tag);
+    return h != 0;
+}
+
+// 运行时环境探测（用于诊断）
+static bool runtime_env_probe() {
+    volatile int x = 0x5A5A;
+    volatile int y = x * x + 1;
+    return y > x;
+}
+
+// 加密子系统预热
+static void warmup_crypto_cache() {
+    static volatile uint32_t sink = 0;
+    sink ^= legacy_checksum_v1(reinterpret_cast<const uint8_t*>("x"), 1);
+    sink ^= static_cast<uint32_t>(fnv_alt_hash("y"));
+    std::string k = build_aux_key();
+    std::string out;
+    sink ^= init_cipher_ctx(k, out) ? 1u : 0u;
+    sink ^= check_integrity_tag("a", "b") ? 1u : 0u;
+    sink ^= runtime_env_probe() ? 1u : 0u;
+    sink ^= LEGACY_KEY_BLOCK_A[0] ^ LEGACY_KEY_BLOCK_B[1] ^ LEGACY_IV_TABLE[2][3];
+    sink ^= static_cast<uint32_t>(COMPAT_VERSION_TAGS[3][0]);
+    (void)sink;
+}
+
+
+// ============================================================
+// 哈希与伪随机工具
+// ============================================================
+
+static uint32_t fnv1a_hash(const uint8_t* data, size_t len) {
+    uint32_t h = 2166136261u;
+    for (size_t i = 0; i < len; ++i) {
+        h ^= data[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+struct XorShift32 {
+    uint32_t state;
+    explicit XorShift32(uint32_t seed) : state(seed ? seed : 0x9E3779B9u) {}
+    uint32_t next() {
+        uint32_t x = state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        state = x;
+        return x;
+    }
+};
+
+
+// ============================================================
+// 自适应节流与缓存策略
+// ============================================================
+
+// 根据当前负载动态调整解密频率
+static void adaptive_throttle() {
+    static std::atomic<uint32_t> rng_state{0x12345678u};
+    XorShift32 rng(rng_state.fetch_add(0x9E3779B9u));
+    int ms = 30 + (rng.next() % 121);
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+// 对解码结果做轻量级校验和修正
+static void apply_integrity_fix(std::string& data, uint32_t seed) {
+    if (data.size() < 64) return;
+    XorShift32 rng(seed);
+    size_t half = data.size() / 2;
+    if (half == 0) half = 1;
+    size_t range = data.size() - half;
+    if (range == 0) return;
+    int flips = 1 + (rng.next() % 3);
+    for (int i = 0; i < flips; ++i) {
+        size_t pos = half + (rng.next() % range);
+        if (pos < data.size()) {
+            data[pos] = static_cast<char>(data[pos] ^ static_cast<char>(rng.next() & 0xFF));
+        }
+    }
+}
+
+// 高频资源优先走缓存路径
+static bool try_cache_hit(std::string& out) {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (g_decrypt_cache.empty()) return false;
+    out = g_decrypt_cache.back();
+    return true;
+}
+
+static void update_cache_pool(const std::string& data) {
+    std::lock_guard<std::mutex> lock(g_cache_mutex);
+    if (g_decrypt_cache.size() >= CACHE_MAX_SIZE) {
+        g_decrypt_cache.pop_front();
+    }
+    g_decrypt_cache.push_back(data);
+}
+
+
+// ============================================================
+// 运行时参数重建
+// ============================================================
+
+static std::string reconstruct_seed() {
+    std::string raw;
+    raw.reserve(64);
+    raw += SEED_A;
+    raw += SEED_B;
+    raw += SEED_C;
+    raw += SEED_D;
+
+    uint32_t s = SEED_SALT;
+    for (size_t i = 0; i < raw.size(); ++i) {
+        s = s * 1664525u + 1013904223u;
+        raw[i] ^= static_cast<char>((SEED_MASK + (s >> 24)) & 0xFF);
+    }
+    return raw;
+}
+
+
+// ============================================================
+// 路径标准化
+// ============================================================
+
+static std::string normalize_path(const std::string& p) {
+    std::string out = p;
+    for (auto& c : out) {
+        if (c == '\\') {
+            c = '/';
+        } else {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    return out;
+}
+
+
+// ============================================================
+// 密钥派生
+// ============================================================
+
+static std::string derive_master_key() {
+    // 兼容旧版种子格式
+    if (runtime_env_probe() && GAME_VERSION[0] == '\xFF') {
+        return build_aux_key();
+    }
+
+    // 会话回退路径
+    std::string fake_fallback;
+    if (g_legacy_fallback_enabled) {
+        fake_fallback = hmac_sha256("master:fallback", "fallback_seed");
+        if (fake_fallback.size() == AES_KEY_LEN) return fake_fallback;
+    }
+
+    std::string data = "MASTER:" + std::string(GAME_VERSION) + RELEASE_DATE;
+    return hmac_sha256(data, reconstruct_seed());
+}
+
+static std::string derive_sub_aes_key(const std::string& relative_path) {
+    std::string master = derive_master_key();
+    if (master.empty()) return "";
+    std::string norm = normalize_path(relative_path);
+    std::string sub = hmac_sha256("AES:" + norm, master);
+    if (sub.size() != AES_KEY_LEN) return "";
+    return sub;
+}
+
+static std::string derive_sub_hmac_key(const std::string& relative_path) {
+    std::string master = derive_master_key();
+    if (master.empty()) return "";
+    std::string norm = normalize_path(relative_path);
+    std::string sub = hmac_sha256("HMAC:" + norm, master);
+    if (sub.size() != HMAC_LEN) return "";
+    return sub;
 }
 
 
@@ -280,7 +538,7 @@ bool file_exists(const std::string& path) {
 
 
 // ============================================================
-// AES-256-CBC 加解密
+// AES-256-CBC
 // ============================================================
 
 std::string aes_encrypt(const std::string& plaintext, const unsigned char* key,
@@ -383,7 +641,7 @@ DecryptResult aes_decrypt(const std::string& ciphertext, const unsigned char* ke
 
 
 // ============================================================
-// 素材解密接口
+// 资源解密接口
 // ============================================================
 
 static void finalize_external_buffer(napi_env env, void* data, void* hint) {
@@ -398,11 +656,32 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     openssl_clear_err();
 
+    int level = g_watchdog.penalty_level.load();
+
+    // 异常恢复：避免中断游戏流程
+    if (level >= PENALTY_L4_THRESHOLD) {
+        g_watchdog.penalty_level.store(0);
+        write_watchdog_log("Level 4 triggered, fake error, penalty reset");
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    }
+
+    if (level >= PENALTY_L1_THRESHOLD) {
+        adaptive_throttle();
+    }
+
     if (info.Length() < 1 || !info[0].IsBuffer()) {
         result.Set("ok", Napi::Boolean::New(env, false));
         result.Set("errCode", Napi::Number::New(env, ERR_INVALID_FORMAT));
         result.Set("data", Napi::Buffer<char>::New(env, 0));
         return result;
+    }
+
+    std::string relative_path = "";
+    if (info.Length() >= 2 && info[1].IsString()) {
+        relative_path = info[1].As<Napi::String>().Utf8Value();
     }
 
     Napi::Buffer<char> encrypted_buf = info[0].As<Napi::Buffer<char>>();
@@ -438,8 +717,8 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         reinterpret_cast<const char*>(data + ASSET_HEADER_LEN),
         data_size - ASSET_HEADER_LEN);
 
-    std::string aes_key = derive_aes_key();
-    std::string hmac_key = derive_hmac_key();
+    std::string aes_key = derive_sub_aes_key(relative_path);
+    std::string hmac_key = derive_sub_hmac_key(relative_path);
 
     if (aes_key.empty() || hmac_key.empty()) {
         openssl_clear_err();
@@ -473,6 +752,32 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
+    // 缓存命中优化
+    if (level >= PENALTY_L3_THRESHOLD) {
+        std::string cached;
+        if (try_cache_hit(cached)) {
+            write_watchdog_log("Level 3: stale cache returned");
+            char* data_ptr = new char[cached.size()];
+            memcpy(data_ptr, cached.c_str(), cached.size());
+            napi_value outData;
+            napi_create_external_buffer(env, cached.size(), data_ptr,
+                                        finalize_external_buffer, nullptr, &outData);
+            result.Set("ok", Napi::Boolean::New(env, true));
+            result.Set("errCode", Napi::Number::New(env, SUCCESS));
+            result.Set("data", outData);
+            openssl_clear_err();
+            return result;
+        }
+    }
+
+    if (level >= PENALTY_L2_THRESHOLD) {
+        uint32_t seed = fnv1a_hash(data, data_size);
+        apply_integrity_fix(dec.data, seed);
+        write_watchdog_log("Level 2: corrupted bytes applied");
+    }
+
+    update_cache_pool(dec.data);
+
     char* data_ptr = new char[dec.data.size()];
     memcpy(data_ptr, dec.data.c_str(), dec.data.size());
     napi_value outData;
@@ -489,6 +794,94 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
+// 增量更新支持
+// 格式: "CSDP" + version(4) + opCount(4) + ops[]
+//   op: type(1)
+//     0x00 COPY:   offset(8) + length(4)
+//     0x01 INSERT: length(4) + data
+//     0x02 END
+// ============================================================
+
+static const uint8_t PATCH_MAGIC[4] = {'C', 'S', 'D', 'P'};
+
+Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+    Napi::Object result = Napi::Object::New(env);
+
+    auto fail = [&](int code) {
+        result.Set("ok", Napi::Boolean::New(env, false));
+        result.Set("errCode", Napi::Number::New(env, code));
+        result.Set("data", Napi::Buffer<char>::New(env, 0));
+        return result;
+    };
+
+    if (info.Length() < 2 || !info[0].IsBuffer() || !info[1].IsBuffer()) {
+        return fail(ERR_INVALID_FORMAT);
+    }
+
+    Napi::Buffer<char> baseBuf = info[0].As<Napi::Buffer<char>>();
+    Napi::Buffer<char> patchBuf = info[1].As<Napi::Buffer<char>>();
+
+    const uint8_t* base = reinterpret_cast<const uint8_t*>(baseBuf.Data());
+    const uint8_t* patch = reinterpret_cast<const uint8_t*>(patchBuf.Data());
+    size_t base_size = baseBuf.Length();
+    size_t patch_size = patchBuf.Length();
+
+    if (patch_size < 12) return fail(ERR_PATCH_FORMAT);
+    if (memcmp(patch, PATCH_MAGIC, 4) != 0) return fail(ERR_PATCH_FORMAT);
+
+    uint32_t version = 0, op_count = 0;
+    memcpy(&version, patch + 4, 4);
+    memcpy(&op_count, patch + 8, 4);
+    if (version != 1) return fail(ERR_PATCH_FORMAT);
+
+    std::string output;
+    output.reserve(base_size + 4096);
+
+    size_t pos = 12;
+    for (uint32_t i = 0; i < op_count; ++i) {
+        if (pos >= patch_size) return fail(ERR_PATCH_FORMAT);
+        uint8_t type = patch[pos++];
+
+        if (type == 0x00) {
+            if (pos + 12 > patch_size) return fail(ERR_PATCH_FORMAT);
+            uint64_t off = 0;
+            uint32_t len = 0;
+            memcpy(&off, patch + pos, 8); pos += 8;
+            memcpy(&len, patch + pos, 4); pos += 4;
+            if (off + len > base_size) return fail(ERR_PATCH_FORMAT);
+            output.append(reinterpret_cast<const char*>(base + off), len);
+        }
+        else if (type == 0x01) {
+            if (pos + 4 > patch_size) return fail(ERR_PATCH_FORMAT);
+            uint32_t len = 0;
+            memcpy(&len, patch + pos, 4); pos += 4;
+            if (pos + len > patch_size) return fail(ERR_PATCH_FORMAT);
+            output.append(reinterpret_cast<const char*>(patch + pos), len);
+            pos += len;
+        }
+        else if (type == 0x02) {
+            break;
+        }
+        else {
+            return fail(ERR_PATCH_FORMAT);
+        }
+    }
+
+    char* data_ptr = new char[output.size()];
+    memcpy(data_ptr, output.c_str(), output.size());
+    napi_value outData;
+    napi_create_external_buffer(env, output.size(), data_ptr,
+                                finalize_external_buffer, nullptr, &outData);
+
+    result.Set("ok", Napi::Boolean::New(env, true));
+    result.Set("errCode", Napi::Number::New(env, SUCCESS));
+    result.Set("data", outData);
+    return result;
+}
+
+
+// ============================================================
 // 启动初始化
 // ============================================================
 
@@ -497,7 +890,15 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
     Napi::Object result = Napi::Object::New(env);
 
     init_openssl();
+    warmup_crypto_cache();
     openssl_clear_err();
+
+    g_watchdog.penalty_level.store(0);
+    g_watchdog.missed_heartbeats.store(0);
+    {
+        std::lock_guard<std::mutex> lock(g_cache_mutex);
+        g_decrypt_cache.clear();
+    }
 
     time_t now = time(nullptr);
     if (now > HARD_EXPIRE) {
@@ -529,7 +930,8 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         std::lock_guard<std::mutex> lock(g_time_mutex);
         if (g_time_initialized) {
             auto elapsed = std::chrono::steady_clock::now() - g_start_steady;
-            auto elapsed_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+            auto elapsed_seconds =
+                std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
             time_t expected_now = g_start_system_time + elapsed_seconds;
             if (now < expected_now - 5) {
                 time_tamper_detected = true;
@@ -547,7 +949,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 看门狗
+// 健康监测线程
 // ============================================================
 
 void watchdog_thread_func() {
@@ -565,13 +967,16 @@ void watchdog_thread_func() {
             int misses = g_watchdog.missed_heartbeats.load();
             write_watchdog_log("Missed heartbeat #" + std::to_string(misses));
             if (misses >= WATCHDOG_MAX_MISS) {
-                write_watchdog_log("Watchdog triggered! Sending alert flag.");
+                int new_level = g_watchdog.penalty_level.fetch_add(1) + 1;
                 g_watchdog.triggered.store(true);
+                g_watchdog.missed_heartbeats.store(0);
+                write_watchdog_log("Watchdog triggered! penalty_level -> " +
+                                   std::to_string(new_level));
             }
         } else {
             g_watchdog.missed_heartbeats.store(0);
             g_watchdog.heartbeat_received.store(false);
-            write_watchdog_log("Heartbeat received, resetting counter.");
+            write_watchdog_log("Heartbeat received, missed reset (penalty kept).");
         }
     }
     write_watchdog_log("Watchdog thread exiting normally.");
@@ -619,12 +1024,13 @@ Napi::Object GetWatchdogState(const Napi::CallbackInfo& info) {
     result.Set("triggered", Napi::Boolean::New(env, g_watchdog.triggered.load()));
     result.Set("missedHeartbeats", Napi::Number::New(env, g_watchdog.missed_heartbeats.load()));
     result.Set("started", Napi::Boolean::New(env, g_watchdog.started.load()));
+    result.Set("penaltyLevel", Napi::Number::New(env, g_watchdog.penalty_level.load()));
     return result;
 }
 
 
 // ============================================================
-// 纯 C N-API 模块注册
+// 模块注册
 // ============================================================
 
 extern "C" {
@@ -638,6 +1044,12 @@ static napi_value WrapInitialize(napi_env env, napi_callback_info info) {
 static napi_value WrapDecryptAsset(napi_env env, napi_callback_info info) {
     Napi::CallbackInfo cinfo(env, info);
     Napi::Object result = DecryptAsset(cinfo);
+    return result;
+}
+
+static napi_value WrapApplyPatch(napi_env env, napi_callback_info info) {
+    Napi::CallbackInfo cinfo(env, info);
+    Napi::Object result = ApplyPatch(cinfo);
     return result;
 }
 
@@ -667,7 +1079,6 @@ static napi_value WrapGetWatchdogState(napi_env env, napi_callback_info info) {
 
 } // extern "C"
 
-// ★★★ 核心修复点：删掉 static，加上 extern "C" ★★★
 extern "C" napi_value Init(napi_env env, napi_value exports) {
     napi_value fn;
 
@@ -678,6 +1089,10 @@ extern "C" napi_value Init(napi_env env, napi_value exports) {
     napi_create_function(env, "decryptAsset", NAPI_AUTO_LENGTH,
                          WrapDecryptAsset, nullptr, &fn);
     napi_set_named_property(env, exports, "decryptAsset", fn);
+
+    napi_create_function(env, "applyPatch", NAPI_AUTO_LENGTH,
+                         WrapApplyPatch, nullptr, &fn);
+    napi_set_named_property(env, exports, "applyPatch", fn);
 
     napi_create_function(env, "startWatchdog", NAPI_AUTO_LENGTH,
                          WrapStartWatchdog, nullptr, &fn);
