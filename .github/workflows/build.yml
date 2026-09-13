@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       game_version:
-        description: '游戏版本号（必填，仅字母数字 . _ -）'
+        description: '游戏版本号（必填，仅字母数字）'
         required: true
         type: string
 
