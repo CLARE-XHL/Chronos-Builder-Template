@@ -8,14 +8,14 @@ on:
         required: true
         type: string
       game_version:
-        description: '游戏版本号（必填）'
+        description: '游戏版本号（必填，仅字母数字 . _ -）'
         required: true
         type: string
-      expiration_date:
-        description: '截止日期（YYYY-MM-DD，留空永不过期）'
-        required: false
-        type: string
-        default: ''
+
+env:
+  # 环境变量传参，避免用户输入被 PowerShell 解释器当作代码执行
+  CS_GAME_NAME: ${{ github.event.inputs.game_name }}
+  CS_GAME_VERSION: ${{ github.event.inputs.game_version }}
 
 jobs:
   build:
@@ -27,6 +27,27 @@ jobs:
     steps:
       - name: 拉取仓库代码
         uses: actions/checkout@v4
+
+      - name: 校验输入
+        run: |
+          if ($env:CS_GAME_VERSION -notmatch '^[0-9A-Za-z._-]+$') {
+            Write-Error "game_version 只能包含字母数字和 . _ -，当前值: $env:CS_GAME_VERSION"
+            exit 1
+          }
+          if ([string]::IsNullOrWhiteSpace($env:CS_GAME_NAME)) {
+            Write-Error "game_name 不能为空"
+            exit 1
+          }
+          Write-Output "输入校验通过: name=$env:CS_GAME_NAME version=$env:CS_GAME_VERSION"
+        shell: powershell
+
+      - name: 计算构建日期
+        id: build_date
+        run: |
+          $date = Get-Date -Format 'yyyy-MM-dd'
+          echo "date=$date" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Output "Build date: $date"
+        shell: powershell
 
       - name: 安装 Node.js
         uses: actions/setup-node@v4
@@ -43,54 +64,69 @@ jobs:
         shell: powershell
 
       - name: 安装 node-addon-api (锁定版本)
-        run: npm install
+        # --ignore-scripts 防止 package.json 里若有 install 脚本
+        # 提前触发一次无 -D 的编译，污染构建产物
+        run: npm install --ignore-scripts
         shell: powershell
         working-directory: native
 
-      # ★ V2.2：生成分片种子 + 掩码 + 盐
+      # ★ P1：生成字符串密文表
+      # 由 tools/gen_str_table.py 生成 native/src/cs_str_table.h
+      # 使用 .NET API 写 ASCII 无 BOM 文件，避免 PowerShell 默认 UTF-16LE 破坏 #include
+      - name: 生成字符串密文表
+        run: |
+          $content = & python tools/gen_str_table.py
+          if (-not $content) {
+            Write-Error "gen_str_table.py produced no output"
+            exit 1
+          }
+          [System.IO.File]::WriteAllLines(
+            (Resolve-Path "native").Path + "\src\cs_str_table.h",
+            $content,
+            [System.Text.Encoding]::ASCII
+          )
+          $headerPath = "native\src\cs_str_table.h"
+          if (-not (Test-Path $headerPath)) {
+            Write-Error "cs_str_table.h not created"
+            exit 1
+          }
+          $size = (Get-Item $headerPath).Length
+          Write-Output "cs_str_table.h generated: $size bytes"
+          Get-Content $headerPath -TotalCount 5 | ForEach-Object { Write-Output $_ }
+        shell: powershell
+
+      # ★ V2.2：生成分片种子
+      # 用 Hex 而非 Base64：Hex 只有 [0-9a-f]，在 node-gyp → MSBuild → cl.exe
+      # 的多层传参里不会被解释为特殊字符
       - name: 生成分片种子
         id: gen
         run: |
-          function New-B64([int]$n) {
+          function New-Hex([int]$n) {
             $b = New-Object byte[] $n
-            (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($b)
-            return [Convert]::ToBase64String($b)
+            [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
+            return -join ($b | ForEach-Object { $_.ToString('x2') })
           }
 
-          $seedA = New-B64 12
-          $seedB = New-B64 12
-          $seedC = New-B64 12
-          $seedD = New-B64 12
-
-          $maskBytes = New-Object byte[] 1
-          (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($maskBytes)
-          $seedMask = [int]$maskBytes[0]
+          $seedA = New-Hex 12
+          $seedB = New-Hex 12
+          $seedC = New-Hex 12
+          $seedD = New-Hex 12
 
           $saltBytes = New-Object byte[] 4
-          (New-Object System.Security.Cryptography.RNGCryptoServiceProvider).GetBytes($saltBytes)
+          [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($saltBytes)
           $seedSalt = [BitConverter]::ToUInt32($saltBytes, 0)
 
           echo "seed_a=$seedA" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           echo "seed_b=$seedB" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           echo "seed_c=$seedC" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           echo "seed_d=$seedD" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          echo "seed_mask=$seedMask" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           echo "seed_salt=$seedSalt" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
           $fullSeed = $seedA + $seedB + $seedC + $seedD
           echo "seed=$fullSeed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-        shell: powershell
 
-      - name: 解析截止日期
-        id: expire
-        run: |
-          if ("${{ github.event.inputs.expiration_date }}" -eq "") {
-            echo "timestamp=2147483647" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          } else {
-            $date = [datetime]::ParseExact("${{ github.event.inputs.expiration_date }}", "yyyy-MM-dd", $null)
-            $timestamp = [int](($date.ToUniversalTime() - (Get-Date "1970-01-01")).TotalSeconds)
-            echo "timestamp=$timestamp" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-          }
+          Write-Output "Seeds generated (hex, 24 chars each)"
+          Write-Output "seed_a anchor: $($seedA.Substring(0,8))..."
         shell: powershell
 
       - name: 编译 decryptor.node (MZ / x64)
@@ -113,29 +149,29 @@ jobs:
 
           cd native
 
-          node-gyp configure --msvs_version=2022 --arch=$arch
-          node-gyp build --release --msvs_version=2022 --arch=$arch `
-            -DGAME_VERSION="${{ github.event.inputs.game_version }}" `
-            -DRELEASE_DATE="$(Get-Date -Format 'yyyy-MM-dd')" `
+          # 所有 -D 宏必须在 configure 阶段传入
+          # build 阶段会忽略 -D，导致宏使用源码默认值
+          # SEED 用 Hex，无特殊字符，避免多层传参被解释
+          # RELEASE_DATE 用统一的 build_date，避免跨天不一致
+          node-gyp configure --msvs_version=2022 --arch=$arch `
+            -DGAME_VERSION="$env:CS_GAME_VERSION" `
+            -DRELEASE_DATE="${{ steps.build_date.outputs.date }}" `
             -DSEED_A="'${{ steps.gen.outputs.seed_a }}'" `
             -DSEED_B="'${{ steps.gen.outputs.seed_b }}'" `
             -DSEED_C="'${{ steps.gen.outputs.seed_c }}'" `
             -DSEED_D="'${{ steps.gen.outputs.seed_d }}'" `
-            -DSEED_MASK=${{ steps.gen.outputs.seed_mask }} `
-            -DSEED_SALT=${{ steps.gen.outputs.seed_salt }}u `
-            -DHARD_EXPIRE="${{ steps.expire.outputs.timestamp }}" `
-            -DWATCHDOG_TIMEOUT_SEC=10 `
-            -DWATCHDOG_MAX_MISS=2
+            -DSEED_SALT=${{ steps.gen.outputs.seed_salt }}u
+
+          node-gyp build --release --msvs_version=2022 --arch=$arch
         shell: powershell
 
       - name: 生成加密配置
         run: |
           $config = [ordered]@{
-            gameName = "${{ github.event.inputs.game_name }}"
-            version  = "${{ github.event.inputs.game_version }}"
-            date     = (Get-Date -Format "yyyy-MM-dd")
+            gameName = $env:CS_GAME_NAME
+            version  = $env:CS_GAME_VERSION
+            date     = "${{ steps.build_date.outputs.date }}"
             seed     = "${{ steps.gen.outputs.seed }}"
-            seedMask = [int]"${{ steps.gen.outputs.seed_mask }}"
             seedSalt = [uint32]"${{ steps.gen.outputs.seed_salt }}"
           }
           $json = $config | ConvertTo-Json
@@ -149,13 +185,11 @@ jobs:
           ============================================================
           Chronos Seal V2.2 - Author Secret Key
           WARNING: This file is the sole credential for game encryption. Keep it safe!
-          Game Name:       ${{ github.event.inputs.game_name }}
-          Version:         ${{ github.event.inputs.game_version }}
+          Game Name:       $env:CS_GAME_NAME
+          Version:         $env:CS_GAME_VERSION
           Engine Target:   MZ_64bit
-          Release Date:    $(Get-Date -Format "yyyy-MM-dd")
-          Expiration:      ${{ github.event.inputs.expiration_date }}
+          Release Date:    ${{ steps.build_date.outputs.date }}
           Derivation Seed: ${{ steps.gen.outputs.seed }}
-          Seed Mask:       ${{ steps.gen.outputs.seed_mask }}
           Seed Salt:       ${{ steps.gen.outputs.seed_salt }}
           Generated:       $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
           ============================================================
@@ -183,6 +217,87 @@ jobs:
             exit 1
           }
           Write-Output "All artifacts generated successfully"
+        shell: powershell
+
+      # ★ P1 验收：二进制里不能出现任何 tag 明文
+      - name: 校验产物无明文 tag
+        run: |
+          $nodePath = "native\build\Release\decryptor.node"
+          if (-not (Test-Path $nodePath)) {
+            Write-Error "decryptor.node not found at: $nodePath"
+            exit 1
+          }
+
+          $bytes = [System.IO.File]::ReadAllBytes($nodePath)
+          $text  = [System.Text.Encoding]::ASCII.GetString($bytes)
+
+          $patterns = @(
+            'MASTER:', 'STAGE2:', 'STAGE3:', 'MASTER:FINAL',
+            'AES:S1:', 'AES:S2:', 'AES:S3:', 'AES:FINAL:',
+            'HMAC:S1:', 'HMAC:S2:', 'HMAC:S3:', 'HMAC:FINAL:'
+          )
+
+          $found = @()
+          foreach ($p in $patterns) {
+            if ($text.Contains($p)) {
+              $found += $p
+            }
+          }
+
+          if ($found.Count -gt 0) {
+            Write-Error "FAIL: plaintext tags found in binary: $($found -join ', ')"
+            Write-Error "说明: cs_str_table.h 未正确生成，或 decryptor.cc 未使用 CS_DECODE_* 宏"
+            exit 1
+          }
+
+          Write-Output "OK: no plaintext tags found in decryptor.node"
+        shell: powershell
+
+      # ★ 校验 SEED 已编入二进制
+      # fork 用户无法本地验证，此步替他验证 -D 是否生效
+      - name: 校验 SEED 已编入二进制
+        run: |
+          $nodePath = "native\build\Release\decryptor.node"
+          if (-not (Test-Path $nodePath)) {
+            Write-Error "decryptor.node not found at: $nodePath"
+            exit 1
+          }
+
+          $bytes = [System.IO.File]::ReadAllBytes($nodePath)
+          $text  = [System.Text.Encoding]::ASCII.GetString($bytes)
+
+          $seedA = "${{ steps.gen.outputs.seed_a }}"
+          $seedB = "${{ steps.gen.outputs.seed_b }}"
+          $seedC = "${{ steps.gen.outputs.seed_c }}"
+          $seedD = "${{ steps.gen.outputs.seed_d }}"
+
+          if ($seedA.Length -lt 16 -or $seedB.Length -lt 16 -or
+              $seedC.Length -lt 16 -or $seedD.Length -lt 16) {
+            Write-Error "Seed values too short. gen step may have failed."
+            exit 1
+          }
+
+          $anchors = @(
+            @{ Name = 'SEED_A'; Value = $seedA.Substring(0, 16) },
+            @{ Name = 'SEED_B'; Value = $seedB.Substring(0, 16) },
+            @{ Name = 'SEED_C'; Value = $seedC.Substring(0, 16) },
+            @{ Name = 'SEED_D'; Value = $seedD.Substring(0, 16) }
+          )
+
+          $missing = @()
+          foreach ($a in $anchors) {
+            if (-not $text.Contains($a.Value)) {
+              $missing += $a.Name
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Error "FAIL: $($missing -join ', ') not found in binary"
+            Write-Error "说明: -D 宏未在 configure 阶段生效，或 SEED 值未编入代码"
+            exit 1
+          }
+
+          Write-Output "OK: SEED_A/B/C/D anchors present in binary"
         shell: powershell
 
       - name: 上传产物
