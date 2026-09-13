@@ -18,7 +18,8 @@
  *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
  *
  *   近期调整:
- *     - 字符串常量改用密文表 + 编译期生成
+ *     - 编译期配置改由外部头文件注入，去除 -D 传参依赖
+ *     - 字符串常量改用密文表
  *     - 运行时环境检查改为进程内一次性读取
  *     - 缓存 key 混入运行时流盐
  *     - 缓存策略统一为插入序淘汰
@@ -38,13 +39,25 @@
 #endif
 
 // ============================================================
-// 字符串密文表（自动生成，无明文 tag 字面量）
+// 字符串密文表（自动生成）
 // ============================================================
 
 #include "cs_str_table.h"
 
 // ============================================================
-// 编译期配置
+// 外部编译期配置
+//
+// CI 构建时由 build_config.h 注入 GAME_VERSION / RELEASE_DATE /
+// SEED_A~D / SEED_SALT。本地开发时该文件不存在，回落到下面的
+// #ifndef 默认值。
+// ============================================================
+
+#if __has_include("build_config.h")
+    #include "build_config.h"
+#endif
+
+// ============================================================
+// 编译期配置默认值
 // ============================================================
 
 #ifndef GAME_VERSION
@@ -67,14 +80,11 @@
 #ifndef SEED_D
 #define SEED_D "ACTIONS_2_2"
 #endif
-#ifndef SEED_MASK
-#define SEED_MASK 0x5A
-#endif
 #ifndef SEED_SALT
 #define SEED_SALT 0x9E3779B9u
 #endif
 
-// HARD_EXPIRE 宏保留以兼容 CI 的 -D 传参，逻辑不再使用
+// 保留以兼容旧构建脚本，逻辑不再使用
 #ifndef HARD_EXPIRE
 #define HARD_EXPIRE 0
 #endif
@@ -112,8 +122,8 @@
 #endif
 
 // 补丁输出上限：4 GiB
-// 补丁输出是完整工程包，天然比单个资源大一个量级，
-// 不能用 MAX_ASSET_SIZE（单资源 50 MB）
+// 补丁输出是完整工程包，比单个资源大一个量级，
+// 不复用 MAX_ASSET_SIZE（单资源 50 MB）
 #ifndef PATCH_MAX_OUTPUT
 #define PATCH_MAX_OUTPUT (4ULL * 1024 * 1024 * 1024)
 #endif
@@ -172,13 +182,12 @@ const size_t MAGIC_LEN = 8;
 const size_t VERSION_LEN = 1;
 const size_t ASSET_HEADER_LEN = MAGIC_LEN + VERSION_LEN + IV_LEN + HMAC_LEN;
 
-// MAGIC_BYTES 是格式标识符，不是密钥派生 tag。
-// 保留明文便于格式识别，攻击者看到不影响攻防。
+// 格式标识符，非密钥派生 tag，保留明文便于格式识别
 const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
 // ============================================================
-// 兼容性密钥块（作为 IDA 交叉引用噪音）
+// 兼容性密钥块（历史资源读取备用，未使用）
 // ============================================================
 
 static const uint8_t LEGACY_KEY_BLOCK_A[32] = {
@@ -304,11 +313,6 @@ void write_watchdog_log(const std::string& msg) {
 
 // ============================================================
 // 运行时环境检查（进程内只调用一次，见 Initialize）
-//
-// 三项检查，低误报：
-//   - IsDebuggerPresent
-//   - CheckRemoteDebuggerPresent
-//   - PEB.BeingDebugged
 // ============================================================
 
 static bool check_runtime_env_cached() {
@@ -398,7 +402,7 @@ static void openssl_clear_err() {
 
 
 // ============================================================
-// 兼容性工具（decoy 群）
+// 历史资源兼容工具
 // ============================================================
 
 static uint32_t legacy_checksum_v1(const uint8_t* data, size_t len) {
@@ -446,7 +450,6 @@ static bool check_integrity_tag(const std::string& data, const std::string& tag)
 }
 
 static bool runtime_env_probe() {
-    // 显式保存字符串，避免临时对象生命周期脆弱点
     std::string env_name = CS_DECODE_RUNTIME_ENV();
     const char* probe = std::getenv(env_name.c_str());
     if (probe && probe[0] == 'd') return true;
