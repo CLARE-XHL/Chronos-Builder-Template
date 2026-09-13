@@ -1,0 +1,42 @@
+# ============================================================
+# Chronos Seal - 仓库忽略规则
+# ============================================================
+
+# ---- 用户本地凭证（绝不进仓库） ----
+encrypt_config.json
+author_secret.txt
+decryptor.node
+
+# ---- CI 生成的编译期配置（每次构建重新生成） ----
+native/src/build_config.h
+native/src/cs_str_table.h
+
+# ---- node-gyp 构建产物 ----
+native/build/
+native/node_modules/
+native/package-lock.json
+
+# ---- Chronos Seal 运行时临时文件 ----
+_cs_scan.txt
+_cs_result.txt
+_cs_verify.txt
+_cs_originals.txt
+watchdog.log
+
+# ---- 通用 ----
+node_modules/
+*.log
+*.tmp
+*.bak
+
+# ---- 编辑器 / IDE ----
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ---- 操作系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
