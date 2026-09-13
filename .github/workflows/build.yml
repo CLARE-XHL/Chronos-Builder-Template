@@ -13,6 +13,7 @@ on:
         type: string
 
 env:
+  # 环境变量传参，避免用户输入被 PowerShell 解释器当作代码执行
   CS_GAME_NAME: ${{ github.event.inputs.game_name }}
   CS_GAME_VERSION: ${{ github.event.inputs.game_version }}
 
@@ -57,28 +58,48 @@ jobs:
         run: npm install -g node-gyp@9.4.0
 
       - name: 安装 node-addon-api (锁定版本)
+        # --ignore-scripts 防止 package.json 里若有 install 脚本
+        # 提前触发一次无 -D 的编译，污染构建产物
         shell: pwsh
         working-directory: native
         run: npm install --ignore-scripts
 
       # ★ P1：生成字符串密文表
+      # - 显式检查 $LASTEXITCODE，防止 Python 报错但 PowerShell 继续
+      # - 检查生成文件大小，小于 1KB 视为失败
       - name: 生成字符串密文表
         shell: pwsh
         run: |
           $content = & python tools/gen_str_table.py
-          if (-not $content) { Write-Error "gen_str_table.py produced no output"; exit 1 }
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "gen_str_table.py failed with exit code $LASTEXITCODE"
+            exit 1
+          }
+          if (-not $content) {
+            Write-Error "gen_str_table.py produced no output"
+            exit 1
+          }
           [System.IO.File]::WriteAllLines(
             (Resolve-Path "native").Path + "\src\cs_str_table.h",
             $content,
             [System.Text.Encoding]::ASCII
           )
           $headerPath = "native\src\cs_str_table.h"
-          if (-not (Test-Path $headerPath)) { Write-Error "cs_str_table.h not created"; exit 1 }
+          if (-not (Test-Path $headerPath)) {
+            Write-Error "cs_str_table.h not created"
+            exit 1
+          }
           $size = (Get-Item $headerPath).Length
+          if ($size -lt 1000) {
+            Write-Error "cs_str_table.h too small ($size bytes), generation likely failed"
+            exit 1
+          }
           Write-Output "cs_str_table.h generated: $size bytes"
           Get-Content $headerPath -TotalCount 5 | ForEach-Object { Write-Output $_ }
 
-      # ★ V2.2：生成分片种子（Hex）
+      # ★ V2.2：生成分片种子
+      # 用 Hex 而非 Base64：Hex 只有 [0-9a-f]，在 node-gyp → MSBuild → cl.exe
+      # 的多层传参里不会被解释为特殊字符
       - name: 生成分片种子
         id: gen
         shell: pwsh
@@ -107,7 +128,7 @@ jobs:
           $fullSeed = $seedA + $seedB + $seedC + $seedD
           "seed=$fullSeed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-          Write-Output "Seeds generated (hex)"
+          Write-Output "Seeds generated (hex, 24 chars each)"
           Write-Output "seed_a anchor: $($seedA.Substring(0,8))..."
 
       - name: 编译 decryptor.node (MZ / x64)
@@ -131,6 +152,10 @@ jobs:
 
           cd native
 
+          # 所有 -D 宏必须在 configure 阶段传入
+          # build 阶段会忽略 -D，导致宏使用源码默认值
+          # SEED 用 Hex，无特殊字符，避免多层传参被解释
+          # RELEASE_DATE 用统一的 build_date，避免跨天不一致
           node-gyp configure --msvs_version=2022 --arch=$arch `
             -DGAME_VERSION="$env:CS_GAME_VERSION" `
             -DRELEASE_DATE="${{ steps.build_date.outputs.date }}" `
@@ -213,6 +238,7 @@ jobs:
           Write-Output "OK: no plaintext tags in decryptor.node"
 
       # ★ 校验 SEED 已编入二进制
+      # fork 用户无法本地验证，此步替他验证 -D 是否生效
       - name: 校验 SEED 已编入二进制
         shell: pwsh
         run: |
