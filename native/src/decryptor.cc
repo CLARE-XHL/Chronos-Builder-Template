@@ -18,13 +18,36 @@
  *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
  *
  *   近期调整:
+ *     - 编译器屏障改用硬件时间戳计数器，避免常量折叠
+ *     - 主密钥派生加入空值日志
+ *     - 补丁接口加入运行时环境检查
  *     - 缓存策略统一为插入序 LRU
- *     - 健康监测线程改为诊断模式
- *     - 时间校验加入防抖窗口
- *     - 调用频率阈值提高，避免弱机加载误触
- *     - 会话凭证只在首次建立，不覆盖
- *     - 清理未使用的文件与加密辅助接口
+ *     - 调用频率超限仅记录，不惩罚
  */
+
+// ============================================================
+// 跨平台宏
+// ============================================================
+
+#ifdef _MSC_VER
+    #define CS_NOINLINE __declspec(noinline)
+#else
+    #define CS_NOINLINE __attribute__((noinline))
+#endif
+
+// 阻止编译器对变量的值做静态推导
+// 各编译器下均使用不可预测的运行时值进行扰动
+#if defined(_MSC_VER)
+    #define CS_OPAQUE_VALUE(x) do { \
+        volatile uint64_t _cs_tsc = __rdtsc(); \
+        (x) ^= _cs_tsc; \
+        _ReadWriteBarrier(); \
+    } while (0)
+#elif defined(__GNUC__) || defined(__clang__)
+    #define CS_OPAQUE_VALUE(x) __asm__ __volatile__("" : "+r"(x))
+#else
+    #define CS_OPAQUE_VALUE(x) ((void)0)
+#endif
 
 // ============================================================
 // 编译期配置
@@ -61,14 +84,6 @@
 #define HARD_EXPIRE 1767225600
 #endif
 
-#ifndef WATCHDOG_TIMEOUT_SEC
-#define WATCHDOG_TIMEOUT_SEC 10
-#endif
-
-#ifndef WATCHDOG_MAX_MISS
-#define WATCHDOG_MAX_MISS 2
-#endif
-
 #ifndef MAX_ASSET_SIZE
 #define MAX_ASSET_SIZE (50 * 1024 * 1024)
 #endif
@@ -94,29 +109,40 @@
 #define CACHE_MAX_SIZE 8
 #endif
 
-// 校验失败阈值
 #ifndef HMAC_CONSEC_FAIL_THRESHOLD
 #define HMAC_CONSEC_FAIL_THRESHOLD 5
 #endif
 
-// 调用频率阈值
+// 调用频率阈值（仅记录）
 #ifndef CALL_FLOOD_THRESHOLD
 #define CALL_FLOOD_THRESHOLD 5000
 #endif
 
-// 降级冷却
 #ifndef PENALTY_COOLDOWN_SEC
 #define PENALTY_COOLDOWN_SEC 60
 #endif
 
-// 时间校验容差
 #ifndef TIME_ROLLBACK_TOLERANCE
 #define TIME_ROLLBACK_TOLERANCE 30
 #endif
 
-// 时间跳变事件阈值
 #ifndef ROLLBACK_STREAK_THRESHOLD
 #define ROLLBACK_STREAK_THRESHOLD 3
+#endif
+
+// 运行时环境检查缓存窗口（秒）
+#ifndef RUNTIME_CACHE_WINDOW_SEC
+#define RUNTIME_CACHE_WINDOW_SEC 5
+#endif
+
+// 备用密钥选择掩码
+#ifndef ALT_KEY_MASK
+#define ALT_KEY_MASK 0x03
+#endif
+
+// 运行时状态异或编码
+#ifndef RUNTIME_OBF_KEY_VAL
+#define RUNTIME_OBF_KEY_VAL 0xCAFEBABEu
 #endif
 
 #define ASSET_VERSION 0x01
@@ -139,7 +165,6 @@
 #include <chrono>
 #include <atomic>
 #include <mutex>
-#include <condition_variable>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -149,6 +174,9 @@
 #ifdef _WIN32
     #include <windows.h>
     #include <fileapi.h>
+    #ifdef _MSC_VER
+        #include <intrin.h>
+    #endif
 #else
     #include <unistd.h>
     #include <sys/stat.h>
@@ -215,6 +243,12 @@ static const char* COMPAT_VERSION_TAGS[] = {
 static volatile uint32_t g_runtime_probe_state = 0;
 static std::atomic<bool> g_state_initialized{false};
 
+// 运行时环境状态（异或编码）
+// 编码值 = 实际状态 ^ RUNTIME_OBF_KEY_VAL
+// 实际状态：0 = 未检测，1 = 标准环境，2 = 异常环境
+static std::atomic<uint32_t> g_runtime_state_obf{0 ^ RUNTIME_OBF_KEY_VAL};
+static std::atomic<time_t> g_runtime_check_time{0};
+
 
 // ============================================================
 // 错误码
@@ -243,18 +277,14 @@ struct WatchdogState {
     std::atomic<bool> heartbeat_received{false};
     std::atomic<int> missed_heartbeats{0};
     std::atomic<int> penalty_level{0};
-    std::atomic<bool> watchdog_exit{false};
     std::atomic<bool> triggered{false};
     std::atomic<bool> started{false};
-    std::thread thread;
-    std::mutex mutex;
-    std::condition_variable cv;
 } g_watchdog;
 
-std::chrono::steady_clock::time_point g_start_steady;
-time_t g_start_system_time = 0;
 std::mutex g_time_mutex;
 bool g_time_initialized = false;
+std::chrono::steady_clock::time_point g_start_steady;
+time_t g_start_system_time = 0;
 
 std::once_flag g_openssl_init_flag;
 
@@ -302,6 +332,75 @@ void write_watchdog_log(const std::string& msg) {
 #else
 #define write_watchdog_log(msg) ((void)0)
 #endif
+
+
+// ============================================================
+// 运行时环境检查（5 秒窗口缓存）
+// ============================================================
+
+static bool check_runtime_env_cached() {
+    time_t now = time(nullptr);
+    time_t last = g_runtime_check_time.load();
+
+    if (last != 0 && now - last < RUNTIME_CACHE_WINDOW_SEC) {
+        uint32_t state = g_runtime_state_obf.load() ^ RUNTIME_OBF_KEY_VAL;
+        if (state == 2u) return true;
+        if (state == 1u) return false;
+    }
+
+    bool anomaly = false;
+
+#ifdef _WIN32
+    if (IsDebuggerPresent()) anomaly = true;
+
+    if (!anomaly) {
+        BOOL remote = FALSE;
+        if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote) {
+            anomaly = true;
+        }
+    }
+
+    if (!anomaly) {
+        PVOID peb = nullptr;
+#ifdef _WIN64
+        #ifdef _MSC_VER
+            peb = reinterpret_cast<PVOID>(__readgsqword(0x60));
+        #else
+            __asm__ __volatile__("movq %%gs:0x60, %0" : "=r"(peb));
+        #endif
+#else
+        #ifdef _MSC_VER
+            peb = reinterpret_cast<PVOID>(__readfsdword(0x30));
+        #else
+            __asm__ __volatile__("movl %%fs:0x30, %0" : "=r"(peb));
+        #endif
+#endif
+        if (peb) {
+            BYTE flag = *(reinterpret_cast<BYTE*>(peb) + 2);
+            if (flag) anomaly = true;
+        }
+    }
+
+    if (!anomaly) {
+        typedef LONG (WINAPI *PFN_NtQIP)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        if (ntdll) {
+            PFN_NtQIP NtQIP = reinterpret_cast<PFN_NtQIP>(
+                GetProcAddress(ntdll, "NtQueryInformationProcess"));
+            if (NtQIP) {
+                ULONG port = 0;
+                LONG status = NtQIP(GetCurrentProcess(), 7,
+                                    &port, sizeof(port), nullptr);
+                if (status == 0 && port != 0) anomaly = true;
+            }
+        }
+    }
+#endif
+
+    g_runtime_state_obf.store((anomaly ? 2u : 1u) ^ RUNTIME_OBF_KEY_VAL);
+    g_runtime_check_time.store(now);
+    return anomaly;
+}
 
 
 // ============================================================
@@ -403,9 +502,7 @@ static bool check_integrity_tag(const std::string& data, const std::string& tag)
 // 运行时环境探测（用于诊断）
 static bool runtime_env_probe() {
     const char* probe = std::getenv("CS_RUNTIME_MODE");
-    if (probe && probe[0] == 'd') {
-        return true;
-    }
+    if (probe && probe[0] == 'd') return true;
     return false;
 }
 
@@ -573,7 +670,7 @@ static void update_verify_stats(bool success, time_t now) {
 
 
 // ============================================================
-// 调用频率统计
+// 调用频率统计（仅记录，不惩罚）
 // ============================================================
 
 static void update_call_rate(time_t now) {
@@ -586,9 +683,8 @@ static void update_call_rate(time_t now) {
     }
     g_call_count++;
     if (g_call_count > CALL_FLOOD_THRESHOLD) {
-        bump_load_indicator(now);
+        write_watchdog_log("High call rate observed (logged only)");
         g_call_count = 0;
-        write_watchdog_log("Call rate -> load bump");
     }
 }
 
@@ -605,10 +701,17 @@ static std::string reconstruct_seed() {
     raw += SEED_C;
     raw += SEED_D;
 
-    uint32_t s = SEED_SALT;
-    for (size_t i = 0; i < raw.size(); ++i) {
-        s = s * 1664525u + 1013904223u;
-        raw[i] ^= static_cast<char>((SEED_MASK + (s >> 24)) & 0xFF);
+    for (int round = 0; round < 8; round++) {
+        uint32_t s = SEED_SALT ^ (static_cast<uint32_t>(round) * 0x9E3779B9u);
+        for (size_t i = 0; i < raw.size(); i++) {
+            s = s * 1664525u + 1013904223u;
+            uint8_t v = static_cast<uint8_t>(raw[i]);
+            v ^= (s >> 24) & 0xFF;
+            v = static_cast<uint8_t>(((v << 3) | (v >> 5)) & 0xFF);
+            v = static_cast<uint8_t>((v + ((s >> 16) & 0xFF)) & 0xFF);
+            v ^= (s >> 8) & 0xFF;
+            raw[i] = static_cast<char>(v);
+        }
     }
     return raw;
 }
@@ -630,40 +733,101 @@ static std::string normalize_path(const std::string& p) {
 // 密钥派生
 // ============================================================
 
-static std::string derive_master_key() {
-    // 兼容旧版种子格式
-    if (runtime_env_probe() && (g_runtime_probe_state == 0xDEADBEEF)) {
-        return build_aux_key();
-    }
+CS_NOINLINE
+static std::string derive_master_key_uncached() {
+    std::string seed = reconstruct_seed();
 
-    // 会话回退路径
-    std::string fallback_material;
-    if (g_runtime_probe_state != 0) {
-        fallback_material = hmac_sha256("master:fallback", "fallback_seed");
-        if (fallback_material.size() == AES_KEY_LEN &&
-            g_runtime_probe_state == 0xDEADBEEF) {
-            return fallback_material;
+    // 运行时不透明值：(x*x)%4 恒 ∈ {0,1}，永不为 2。
+    // CS_OPAQUE_VALUE 让 x 的值在编译期不可推导。
+    volatile uint64_t v_runtime =
+        static_cast<uint64_t>(seed.size()) |
+        (static_cast<uint64_t>(time(nullptr)) << 32);
+    CS_OPAQUE_VALUE(v_runtime);
+
+    if ((v_runtime * v_runtime) % 4 == 2) {
+        // 变体路径：字符串与主路径完全一致，仅 seed 被扰动
+        std::string alt_seed = seed;
+        for (size_t i = 0; i < alt_seed.size(); ++i) {
+            alt_seed[i] = static_cast<char>(alt_seed[i] ^ 0xA5);
         }
+        std::string ak1 = hmac_sha256(
+            "MASTER:" + std::string(GAME_VERSION) + RELEASE_DATE, alt_seed);
+        std::string ak2 = hmac_sha256("STAGE2:" + ak1, alt_seed);
+        std::string ak3 = hmac_sha256("STAGE3:" + ak2, ak1);
+        return hmac_sha256("MASTER:FINAL", ak3);
     }
 
-    std::string data = "MASTER:" + std::string(GAME_VERSION) + RELEASE_DATE;
-    return hmac_sha256(data, reconstruct_seed());
+    std::string k1 = hmac_sha256(
+        "MASTER:" + std::string(GAME_VERSION) + RELEASE_DATE, seed);
+    std::string k2 = hmac_sha256("STAGE2:" + k1, seed);
+    std::string k3 = hmac_sha256("STAGE3:" + k2, k1);
+    return hmac_sha256("MASTER:FINAL", k3);
 }
 
-static std::string derive_sub_aes_key(const std::string& relative_path) {
+// 每进程只算一次，保证所有子密钥共用同一主密钥
+static std::string derive_master_key() {
+    static std::once_flag g_master_once;
+    static std::string g_master_cached;
+    std::call_once(g_master_once, []() {
+        g_master_cached = derive_master_key_uncached();
+        if (g_master_cached.empty()) {
+            write_watchdog_log("CRITICAL: master key derivation failed");
+        }
+    });
+    return g_master_cached;
+}
+
+// AES 子密钥派生返回结构：密钥 + 是否使用变体
+struct AesSubKeyResult {
+    std::string key;
+    bool variant;
+};
+
+// 是否为此路径使用变体密钥
+static bool should_use_alt_key(const std::string& norm_path, bool alt_mode) {
+    if (!alt_mode) return false;
+    uint32_t ph = fnv1a_hash(
+        reinterpret_cast<const uint8_t*>(norm_path.data()),
+        norm_path.size());
+    return (ph & ALT_KEY_MASK) == 0;
+}
+
+static AesSubKeyResult derive_sub_aes_key(const std::string& relative_path,
+                                          bool alt_mode) {
+    AesSubKeyResult r{"", false};
+
     std::string master = derive_master_key();
-    if (master.empty()) return "";
+    if (master.empty()) return r;
     std::string norm = normalize_path(relative_path);
-    std::string sub = hmac_sha256("AES:" + norm, master);
-    if (sub.size() != AES_KEY_LEN) return "";
-    return sub;
+
+    std::string s1 = hmac_sha256("AES:S1:" + norm, master);
+    std::string s2 = hmac_sha256("AES:S2:" + s1, master);
+    std::string s3 = hmac_sha256("AES:S3:" + s2, s1);
+    std::string sub = hmac_sha256("AES:FINAL:" + norm, s3);
+
+    if (sub.size() != AES_KEY_LEN) return r;
+
+    if (should_use_alt_key(norm, alt_mode)) {
+        for (size_t i = 0; i < sub.size(); ++i) {
+            sub[i] = static_cast<char>(sub[i] ^ 0x5A);
+        }
+        r.variant = true;
+    }
+
+    r.key = sub;
+    return r;
 }
 
 static std::string derive_sub_hmac_key(const std::string& relative_path) {
     std::string master = derive_master_key();
     if (master.empty()) return "";
     std::string norm = normalize_path(relative_path);
-    std::string sub = hmac_sha256("HMAC:" + norm, master);
+
+    std::string s1 = hmac_sha256("HMAC:S1:" + norm, master);
+    std::string s2 = hmac_sha256("HMAC:S2:" + s1, master);
+    std::string s3 = hmac_sha256("HMAC:S3:" + s2, s1);
+    std::string sub = hmac_sha256("HMAC:FINAL:" + norm, s3);
+
     if (sub.size() != HMAC_LEN) return "";
     return sub;
 }
@@ -767,8 +931,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         }
 
         if (!credential_ok) {
-            bump_load_indicator(now);
-            write_watchdog_log("Credential check failed");
             result.Set("ok", Napi::Boolean::New(env, false));
             result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
             result.Set("data", Napi::Buffer<char>::New(env, 0));
@@ -785,10 +947,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     }
 
     // 时间跳变检测（独立事件计数）
-    // 语义：
-    //   一次跳变事件 = 从"检测到时间低于 last"开始，到"时间恢复前进"结束
-    //   同一事件内只累计 1 次
-    //   独立 3 次跳变事件才推一次指示器
     {
         time_t last = g_last_seen_time.load();
         if (last != 0 && now < last - TIME_ROLLBACK_TOLERANCE) {
@@ -802,7 +960,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
                     write_watchdog_log("Time jump count -> load bump");
                 }
             }
-            // 已有 marker → 同一事件，不重复累计
         } else if (last == 0 || now > last) {
             g_last_seen_time.store(now);
             g_time_jump_marker.store(0);
@@ -813,8 +970,11 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     int level = g_watchdog.penalty_level.load();
 
+    // 运行时环境检查：本次解密只探测一次
+    bool alt_mode = check_runtime_env_cached();
+
     // Level 4：静默降级 + 空返回
-    if (level >= PENALTY_L4_THRESHOLD) {
+    if (level >= PENALTY_L4_THRESHOLD && alt_mode) {
         int cur = level;
         bool dropped = false;
         while (cur > 0) {
@@ -832,15 +992,11 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // 调用频率统计（本次推的指示器只影响下次）
     update_call_rate(now);
-
     level = g_watchdog.penalty_level.load();
-    // 若被 update_call_rate 推到 L4，本次不触发空返回；
-    // L1/L2/L3 惩罚仍在后续流程生效
 
     // Level 1：自适应节流
-    if (level >= PENALTY_L1_THRESHOLD) {
+    if (level >= PENALTY_L1_THRESHOLD && alt_mode) {
         adaptive_throttle();
     }
 
@@ -902,10 +1058,10 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         reinterpret_cast<const char*>(data + offset),
         data_size - offset);
 
-    std::string aes_key = derive_sub_aes_key(norm_path);
+    AesSubKeyResult aes_res = derive_sub_aes_key(norm_path, alt_mode);
     std::string hmac_key = derive_sub_hmac_key(norm_path);
 
-    if (aes_key.empty() || hmac_key.empty()) {
+    if (aes_res.key.empty() || hmac_key.empty()) {
         openssl_clear_err();
         result.Set("ok", Napi::Boolean::New(env, false));
         result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
@@ -940,23 +1096,12 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     uint32_t content_hash = fnv1a_hash(data, data_size);
 
-    if (level >= PENALTY_L3_THRESHOLD) {
+    // Level 3：缓存命中返回
+    if (level >= PENALTY_L3_THRESHOLD && alt_mode) {
         std::string cached;
         int r = query_cache_entry(norm_path, content_hash, cached);
-        if (r == 1) {
-            write_watchdog_log("Level 3: stale cache returned");
-            char* data_ptr = new char[cached.size()];
-            memcpy(data_ptr, cached.c_str(), cached.size());
-            napi_value outData;
-            napi_create_external_buffer(env, cached.size(), data_ptr,
-                                        finalize_external_buffer, nullptr, &outData);
-            result.Set("ok", Napi::Boolean::New(env, true));
-            result.Set("errCode", Napi::Number::New(env, SUCCESS));
-            result.Set("data", outData);
-            openssl_clear_err();
-            return result;
-        }
-        if (r == 2) {
+        if (r == 1 || r == 2) {
+            write_watchdog_log("Level 3: cache returned");
             char* data_ptr = new char[cached.size()];
             memcpy(data_ptr, cached.c_str(), cached.size());
             napi_value outData;
@@ -971,7 +1116,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     }
 
     DecryptResult dec = aes_decrypt(ciphertext,
-        reinterpret_cast<const unsigned char*>(aes_key.c_str()), iv);
+        reinterpret_cast<const unsigned char*>(aes_res.key.c_str()), iv);
 
     if (!dec.ok) {
         openssl_clear_err();
@@ -982,13 +1127,16 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     }
 
     // Level 2：字节修正
-    if (level >= PENALTY_L2_THRESHOLD) {
+    if (level >= PENALTY_L2_THRESHOLD && alt_mode) {
         uint32_t seed = fnv1a_hash(data, data_size);
         apply_integrity_fix(dec.data, seed);
         write_watchdog_log("Level 2: integrity fix applied");
     }
 
-    store_cache_entry(norm_path, content_hash, dec.data);
+    // 变体路径不写缓存
+    if (!aes_res.variant) {
+        store_cache_entry(norm_path, content_hash, dec.data);
+    }
 
     char* data_ptr = new char[dec.data.size()];
     memcpy(data_ptr, dec.data.c_str(), dec.data.size());
@@ -1031,7 +1179,6 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
         return fail(ERR_INVALID_FORMAT);
     }
 
-    // 调用凭证校验
     {
         bool credential_ok = false;
         {
@@ -1044,9 +1191,12 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
                 }
             }
         }
-        if (!credential_ok) {
-            return fail(ERR_UNKNOWN);
-        }
+        if (!credential_ok) return fail(ERR_UNKNOWN);
+    }
+
+    // 运行时环境异常时静默拒绝
+    if (check_runtime_env_cached()) {
+        return fail(ERR_PATCH_FORMAT);
     }
 
     Napi::Buffer<char> baseBuf = info[0].As<Napi::Buffer<char>>();
@@ -1142,6 +1292,9 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         g_time_jump_marker.store(0);
         g_time_jump_count.store(0);
 
+        g_runtime_state_obf.store(0u ^ RUNTIME_OBF_KEY_VAL);
+        g_runtime_check_time.store(0);
+
         {
             std::lock_guard<std::mutex> lock(g_cache_mutex);
             g_cache_map.clear();
@@ -1160,7 +1313,6 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
 
     // 保存调用凭证
     // 只在首次（尚无凭证）时保存，不覆盖已有引用。
-    // 避免同进程内二次初始化时替换会话引用，导致先注册方失效。
     if (info.Length() >= 1 && info[0].IsObject()) {
         std::lock_guard<std::mutex> lock(g_credential_mutex);
         if (!g_credential_ref) {
@@ -1221,66 +1373,17 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 健康监测线程（诊断模式）
+// 健康监测接口（线程已删除，仅置标志）
 // ============================================================
 
-void watchdog_thread_func() {
-    try {
-        std::unique_lock<std::mutex> lock(g_watchdog.mutex);
-        while (!g_watchdog.watchdog_exit.load()) {
-            if (g_watchdog.cv.wait_for(lock, std::chrono::seconds(WATCHDOG_TIMEOUT_SEC),
-                [&] { return g_watchdog.watchdog_exit.load(); })) {
-                break;
-            }
-
-            if (g_watchdog.watchdog_exit.load()) break;
-
-            if (!g_watchdog.heartbeat_received.load()) {
-                g_watchdog.missed_heartbeats.fetch_add(1);
-                int misses = g_watchdog.missed_heartbeats.load();
-                write_watchdog_log("Missed heartbeat #" + std::to_string(misses));
-                if (misses >= WATCHDOG_MAX_MISS) {
-                    write_watchdog_log("Heartbeat miss streak (diagnostic only)");
-                    g_watchdog.missed_heartbeats.store(0);
-                }
-            } else {
-                g_watchdog.missed_heartbeats.store(0);
-                g_watchdog.heartbeat_received.store(false);
-                write_watchdog_log("Heartbeat received, missed reset.");
-            }
-        }
-        write_watchdog_log("Watchdog thread exiting normally.");
-    } catch (...) {
-        g_watchdog.watchdog_exit.store(true);
-        g_watchdog.started.store(false);
-        write_watchdog_log("Watchdog thread caught exception, exiting.");
-    }
-}
-
 void StartWatchdog(const Napi::CallbackInfo& info) {
-    std::lock_guard<std::mutex> lock(g_watchdog.mutex);
-    if (!g_watchdog.started.load()) {
-        g_watchdog.watchdog_exit.store(false);
-        g_watchdog.heartbeat_received.store(true);
-        g_watchdog.missed_heartbeats.store(0);
-        g_watchdog.triggered.store(false);
-        g_watchdog.thread = std::thread(watchdog_thread_func);
-        g_watchdog.started.store(true);
-        write_watchdog_log("Watchdog started.");
-    }
+    g_watchdog.started.store(true);
+    write_watchdog_log("Watchdog started (flag only).");
 }
 
 void StopWatchdog(const Napi::CallbackInfo& info) {
-    {
-        std::lock_guard<std::mutex> lock(g_watchdog.mutex);
-        g_watchdog.watchdog_exit.store(true);
-        g_watchdog.cv.notify_all();
-    }
-    if (g_watchdog.thread.joinable()) {
-        g_watchdog.thread.join();
-    }
     g_watchdog.started.store(false);
-    write_watchdog_log("Watchdog stopped.");
+    write_watchdog_log("Watchdog stopped (flag only).");
 }
 
 void HeartbeatReply(const Napi::CallbackInfo& info) {
@@ -1288,7 +1391,6 @@ void HeartbeatReply(const Napi::CallbackInfo& info) {
     g_watchdog.missed_heartbeats.store(0);
     if (g_watchdog.triggered.load()) {
         g_watchdog.triggered.store(false);
-        write_watchdog_log("Watchdog alert reset by heartbeat.");
     }
 }
 
