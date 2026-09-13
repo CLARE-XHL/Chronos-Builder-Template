@@ -18,10 +18,11 @@
  *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
  *
  *   近期调整:
- *     - 历史资源校验工具重命名，语义对齐
  *     - 缓存策略统一为插入序 LRU
  *     - 健康监测线程改为诊断模式
  *     - 时间校验加入防抖窗口
+ *     - 调用频率阈值提高，避免弱机加载误触
+ *     - 会话凭证只在首次建立，不覆盖
  *     - 清理未使用的文件与加密辅助接口
  */
 
@@ -100,7 +101,7 @@
 
 // 调用频率阈值
 #ifndef CALL_FLOOD_THRESHOLD
-#define CALL_FLOOD_THRESHOLD 2000
+#define CALL_FLOOD_THRESHOLD 5000
 #endif
 
 // 降级冷却
@@ -113,8 +114,9 @@
 #define TIME_ROLLBACK_TOLERANCE 30
 #endif
 
-#ifndef ROLLBACK_PENALTY_COOLDOWN_SEC
-#define ROLLBACK_PENALTY_COOLDOWN_SEC 60
+// 时间跳变事件阈值
+#ifndef ROLLBACK_STREAK_THRESHOLD
+#define ROLLBACK_STREAK_THRESHOLD 3
 #endif
 
 #define ASSET_VERSION 0x01
@@ -177,7 +179,7 @@ const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
 // ============================================================
-// 兼容性密钥块（历史资源读取备用）
+// 兼容性密钥块（历史资源读取备用，未使用）
 // ============================================================
 
 static const uint8_t LEGACY_KEY_BLOCK_A[32] = {
@@ -274,7 +276,15 @@ time_t g_call_window_start = 0;
 
 std::atomic<time_t> g_last_seen_time{0};
 std::atomic<time_t> g_last_penalty_time{0};
-std::atomic<time_t> g_last_rollback_penalty{0};
+
+// 时间跳变事件标记：0 表示当前无跳变
+// 首次检测到跳变时记录时间戳，恢复前进时清零
+std::atomic<time_t> g_time_jump_marker{0};
+std::atomic<int> g_time_jump_count{0};
+
+// 调用凭证
+std::mutex g_credential_mutex;
+napi_ref g_credential_ref = nullptr;
 
 
 // ============================================================
@@ -742,6 +752,30 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     time_t now = time(nullptr);
 
+    // 调用凭证校验
+    {
+        bool credential_ok = false;
+        {
+            std::lock_guard<std::mutex> lock(g_credential_mutex);
+            if (g_credential_ref && info.Length() >= 3 && info[2].IsObject()) {
+                napi_value expected = nullptr;
+                napi_get_reference_value(env, g_credential_ref, &expected);
+                if (expected) {
+                    napi_strict_equals(env, info[2], expected, &credential_ok);
+                }
+            }
+        }
+
+        if (!credential_ok) {
+            bump_load_indicator(now);
+            write_watchdog_log("Credential check failed");
+            result.Set("ok", Napi::Boolean::New(env, false));
+            result.Set("errCode", Napi::Number::New(env, ERR_UNKNOWN));
+            result.Set("data", Napi::Buffer<char>::New(env, 0));
+            return result;
+        }
+    }
+
     // 硬性过期检查
     if (now > HARD_EXPIRE) {
         result.Set("ok", Napi::Boolean::New(env, false));
@@ -750,22 +784,28 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // 时间跳变检测（同秒不重复 + 60s 冷却）
+    // 时间跳变检测（独立事件计数）
+    // 语义：
+    //   一次跳变事件 = 从"检测到时间低于 last"开始，到"时间恢复前进"结束
+    //   同一事件内只累计 1 次
+    //   独立 3 次跳变事件才推一次指示器
     {
         time_t last = g_last_seen_time.load();
         if (last != 0 && now < last - TIME_ROLLBACK_TOLERANCE) {
-            time_t last_rb = g_last_rollback_penalty.load();
-            bool allow = (last_rb == 0) ||
-                         (now - last_rb > ROLLBACK_PENALTY_COOLDOWN_SEC) ||
-                         (now != last_rb);
-            if (allow && now != last_rb) {
-                bump_load_indicator(now);
-                g_last_rollback_penalty.store(now);
-                write_watchdog_log("Time jump -> load bump");
+            time_t marker = g_time_jump_marker.load();
+            if (marker == 0) {
+                g_time_jump_marker.store(now);
+                int count = g_time_jump_count.fetch_add(1) + 1;
+                if (count >= ROLLBACK_STREAK_THRESHOLD) {
+                    bump_load_indicator(now);
+                    g_time_jump_count.store(0);
+                    write_watchdog_log("Time jump count -> load bump");
+                }
             }
-            // 不回写 g_last_seen_time
+            // 已有 marker → 同一事件，不重复累计
         } else if (last == 0 || now > last) {
             g_last_seen_time.store(now);
+            g_time_jump_marker.store(0);
         }
     }
 
@@ -900,7 +940,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     uint32_t content_hash = fnv1a_hash(data, data_size);
 
-    // 缓存查询
     if (level >= PENALTY_L3_THRESHOLD) {
         std::string cached;
         int r = query_cache_entry(norm_path, content_hash, cached);
@@ -990,6 +1029,24 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
 
     if (info.Length() < 2 || !info[0].IsBuffer() || !info[1].IsBuffer()) {
         return fail(ERR_INVALID_FORMAT);
+    }
+
+    // 调用凭证校验
+    {
+        bool credential_ok = false;
+        {
+            std::lock_guard<std::mutex> lock(g_credential_mutex);
+            if (g_credential_ref && info.Length() >= 3 && info[2].IsObject()) {
+                napi_value expected = nullptr;
+                napi_get_reference_value(env, g_credential_ref, &expected);
+                if (expected) {
+                    napi_strict_equals(env, info[2], expected, &credential_ok);
+                }
+            }
+        }
+        if (!credential_ok) {
+            return fail(ERR_UNKNOWN);
+        }
     }
 
     Napi::Buffer<char> baseBuf = info[0].As<Napi::Buffer<char>>();
@@ -1082,7 +1139,8 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         g_watchdog.missed_heartbeats.store(0);
         g_last_seen_time.store(0);
         g_last_penalty_time.store(0);
-        g_last_rollback_penalty.store(0);
+        g_time_jump_marker.store(0);
+        g_time_jump_count.store(0);
 
         {
             std::lock_guard<std::mutex> lock(g_cache_mutex);
@@ -1097,6 +1155,16 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
             std::lock_guard<std::mutex> lock(g_call_mutex);
             g_call_count = 0;
             g_call_window_start = 0;
+        }
+    }
+
+    // 保存调用凭证
+    // 只在首次（尚无凭证）时保存，不覆盖已有引用。
+    // 避免同进程内二次初始化时替换会话引用，导致先注册方失效。
+    if (info.Length() >= 1 && info[0].IsObject()) {
+        std::lock_guard<std::mutex> lock(g_credential_mutex);
+        if (!g_credential_ref) {
+            napi_create_reference(env, info[0], 1, &g_credential_ref);
         }
     }
 
