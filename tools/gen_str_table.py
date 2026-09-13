@@ -1,36 +1,43 @@
 #!/usr/bin/env python3
 """
-Chronos Seal - 字符串加密表生成工具
+Chronos Seal - String encryption table generator
 
-用法（CI 环境）:
-    由 build.yml 调用，输出到 native/src/cs_str_table.h
-
-用法（本地手动）:
+Usage:
     python tools/gen_str_table.py > native/src/cs_str_table.h
 
-生成的头文件包含:
-    - 每个 tag 的密文字节数组（inline constexpr，多 TU 共享一份）
-    - 每个 tag 的 32 位 LCG 流密钥 seed
-    - cs_decode() 内联函数
-    - CS_DECODE_XXX() 便捷宏
+Generates:
+    - ciphertext byte array for each tag (compile-time constant)
+    - 32-bit LCG stream-key seed per tag
+    - inline cs_decode() function
+    - CS_DECODE_XXX() convenience macros
 
-设计说明:
-    - seed 由 tag 明文的 FNV-1a 哈希派生（32 位），可选混入 CS_BUILD_SALT
-    - 流密钥逐字节变化：s = s * 1664525 + 1013904223，字节取自 (s >> 16) & 0xFF
-    - 单字节 8 位 key 会被秒破，32 位流密钥暴力空间 4G，且无法用首字节剪枝
-    - 本文件中的 tag 明文列表是**已知暴露面**：防御目标是"二进制不暴露指纹"，
-      不是"保护算法结构"。真正的秘密是 SEED_A ~ SEED_D，不在本脚本里。
+Design notes:
+    - seed derived from tag plaintext via FNV-1a 32-bit, optionally XORed with CS_BUILD_SALT
+    - stream key per byte: s = s * 1664525 + 1013904223; byte = (s >> 16) & 0xFF
+    - 8-bit single key is brute-forceable in seconds; 32-bit stream key is not
+    - The tag plaintext list below is a KNOWN EXPOSED SURFACE. It is metadata for the
+      key derivation path, not the key itself. The real secret is SEED_A ~ SEED_D
+      (not in this file).
 
-环境变量:
-    CS_BUILD_SALT   可选，整数（支持 0x 前缀）。默认 0。
-                    混入 seed 派生，让不同构建的密文不同。
-                    本轮默认不启用；将来想开，在 build.yml 里传值即可。
+Environment variables:
+    CS_BUILD_SALT   Optional, integer (0x prefix allowed). Default 0.
+                    Mixed into seed derivation to make ciphertext per-build unique.
+                    Currently disabled by default; enable in build.yml if needed.
+
+Note:
+    Output is pure ASCII to avoid Windows cp1252 stdout encoding issues.
 """
 
 import os
 import sys
 
-# 可选 build salt：默认 0（不启用）
+# Defensive: force UTF-8 on stdout (Windows defaults to cp1252 otherwise)
+try:
+    sys.stdout.reconfigure(encoding='utf-8')
+except Exception:
+    pass
+
+# Optional build salt: default 0 (disabled)
 try:
     BUILD_SALT = int(os.environ.get('CS_BUILD_SALT', '0'), 0) & 0xFFFFFFFF
 except ValueError:
@@ -55,7 +62,7 @@ TAGS = [
 
 
 def fnv1a_seed(plain: str, build_salt: int) -> int:
-    """由明文派生 32 位 seed。FNV-1a 32-bit，可选混入 build_salt。"""
+    """Derive 32-bit seed from plaintext. FNV-1a 32-bit, optionally XORed with build_salt."""
     h = 0x811C9DC5
     for b in plain.encode('utf-8'):
         h ^= b
@@ -65,7 +72,7 @@ def fnv1a_seed(plain: str, build_salt: int) -> int:
 
 
 def encode(plain: str, seed: int):
-    """LCG 流密钥逐字节 XOR 编码。必须与 C++ cs_decode 严格一致。"""
+    """LCG stream-key byte-wise XOR encoding. Must match C++ cs_decode exactly."""
     out = []
     s = seed
     for c in plain.encode('utf-8'):
@@ -78,9 +85,9 @@ def main():
     out = sys.stdout
 
     out.write("// ============================================================\n")
-    out.write("// 自动生成，请勿手动编辑\n")
-    out.write("// 生成工具: tools/gen_str_table.py\n")
-    out.write("// 重新生成: python tools/gen_str_table.py > native/src/cs_str_table.h\n")
+    out.write("// Auto-generated. Do not edit manually.\n")
+    out.write("// Generator: tools/gen_str_table.py\n")
+    out.write("// Regenerate: python tools/gen_str_table.py > native/src/cs_str_table.h\n")
     out.write("// ============================================================\n")
     out.write("\n")
     out.write("#pragma once\n")
