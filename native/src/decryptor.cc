@@ -16,16 +16,6 @@
  * 维护者注:
  *   本模块提供资源解密、运行时健康监测与增量更新支持。
  *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
- *
- *   近期调整:
- *     - 编译期配置改由外部头文件注入，去除 -D 传参依赖
- *     - 字符串常量改用密文表
- *     - 运行时环境检查改为进程内一次性读取
- *     - 缓存 key 混入运行时流盐
- *     - 缓存策略统一为插入序淘汰
- *     - 调用频率超限仅记录
- *     - 补丁解析加操作数上限 + 显式小端读取
- *     - 补丁输出加独立上限（不复用单资源上限）
  */
 
 // ============================================================
@@ -187,7 +177,7 @@ const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
 // ============================================================
-// 兼容性密钥块（历史资源读取备用，未使用）
+// 历史版本兼容数据（旧资源读取备用，未使用）
 // ============================================================
 
 static const uint8_t LEGACY_KEY_BLOCK_A[32] = {
@@ -224,8 +214,7 @@ static std::atomic<bool> g_state_initialized{false};
 // 运行时环境状态缓存（进程内只读一次，见 Initialize）
 static std::atomic<int> g_runtime_state{-1};
 
-// 运行时流盐
-// CS-DBG: data-flow only, no behavioral impact
+// 运行时数据流盐
 // 由 Initialize 时的运行时环境检查一次性混入，之后稳定
 static std::atomic<uint64_t> g_runtime_salt{0x5A5A5A5A5A5A5A5AULL};
 
@@ -456,7 +445,7 @@ static bool runtime_env_probe() {
     return false;
 }
 
-static void warmup_crypto_cache() {
+static void init_crypto_helpers() {
     static volatile uint32_t sink = 0;
     sink ^= legacy_checksum_v1(reinterpret_cast<const uint8_t*>("x"), 1);
     sink ^= static_cast<uint32_t>(fnv_alt_hash("y"));
@@ -519,7 +508,7 @@ static void store_cache_entry(const std::string& key,
 
 
 // ============================================================
-// 校验统计（仅混入流盐，无副作用）
+// 校验统计（仅更新流盐，无副作用）
 // ============================================================
 
 static void update_verify_stats(bool success, time_t now) {
@@ -533,7 +522,6 @@ static void update_verify_stats(bool success, time_t now) {
 
     g_global_hmac_streak++;
     if (g_global_hmac_streak >= HMAC_CONSEC_FAIL_THRESHOLD) {
-        // CS-DBG: data-flow only
         g_runtime_salt.fetch_xor(0x9E3779B97F4A7C15ULL);
         g_global_hmac_streak = 0;
     }
@@ -765,7 +753,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         }
     }
 
-    // 时间跳变检测（仅混入流盐，不报错）
+    // 时间跳变检测（仅更新流盐，不报错）
     {
         time_t last = g_last_seen_time.load();
         if (last != 0 && now < last - TIME_ROLLBACK_TOLERANCE) {
@@ -776,7 +764,6 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
                     g_time_jump_marker.store(now);
                     int count = g_time_jump_count.fetch_add(1) + 1;
                     if (count >= ROLLBACK_STREAK_THRESHOLD) {
-                        // CS-DBG: data-flow only
                         g_runtime_salt.fetch_xor(0xBF58476D1CE4E5B9ULL);
                         g_time_jump_count.store(0);
                     }
@@ -859,8 +846,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         return result;
     }
 
-    // ---- HMAC 输入构造（等价分支） ----
-    // CS-DBG: equivalent branches, no semantic difference
+    // ---- 构造 HMAC 输入 ----
     uint64_t salt_snapshot = g_runtime_salt.load();
     std::string hmac_input;
 
@@ -893,8 +879,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     uint32_t content_hash = fnv1a_hash(data, data_size);
 
-    // 缓存 key 混入流盐（盐稳定，缓存正常）
-    // CS-DBG: data-flow only
+    // 缓存 key 混入流盐
     std::string cache_key = norm_path + "#" +
         std::to_string(salt_snapshot & 0xFFFF);
 
@@ -1030,7 +1015,6 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
             if (off > base_size || len > base_size - off) {
                 return fail(ERR_PATCH_FORMAT);
             }
-            // 输出上限检查（用 PATCH_MAX_OUTPUT，不是 MAX_ASSET_SIZE）
             if (output.size() + static_cast<size_t>(len) > PATCH_MAX_OUTPUT) {
                 return fail(ERR_ASSET_TOO_LARGE);
             }
@@ -1040,7 +1024,6 @@ Napi::Object ApplyPatch(const Napi::CallbackInfo& info) {
             if (pos + 4 > patch_size) return fail(ERR_PATCH_FORMAT);
             uint32_t len = read_u32le(patch + pos); pos += 4;
             if (pos + len > patch_size) return fail(ERR_PATCH_FORMAT);
-            // 输出上限检查（用 PATCH_MAX_OUTPUT，不是 MAX_ASSET_SIZE）
             if (output.size() + static_cast<size_t>(len) > PATCH_MAX_OUTPUT) {
                 return fail(ERR_ASSET_TOO_LARGE);
             }
@@ -1082,7 +1065,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
     bool is_first = g_state_initialized.compare_exchange_strong(expected, true);
 
     static std::once_flag g_noise_once;
-    std::call_once(g_noise_once, []() { warmup_crypto_cache(); });
+    std::call_once(g_noise_once, []() { init_crypto_helpers(); });
 
     if (is_first) {
         g_watchdog.missed_heartbeats.store(0);
@@ -1110,8 +1093,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
     }
 
     // 运行时环境检查：进程内只查一次，结果混入流盐
-    // CS-DBG: data-flow only, no behavioral impact
-    // 位置必须紧跟 is_first 块之后，避免被 store(0x5A...) 覆盖
+    // 位置紧跟 is_first 块之后
     static std::once_flag g_salt_seed_once;
     std::call_once(g_salt_seed_once, []() {
         if (check_runtime_env_cached()) {
@@ -1173,7 +1155,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
 
 
 // ============================================================
-// 看门狗接口（线程已删，仅标志）
+// 看门狗接口
 // ============================================================
 
 void StartWatchdog(const Napi::CallbackInfo& info) {
