@@ -130,7 +130,20 @@ jobs:
           )
           [System.IO.File]::WriteAllLines(
             "native\src\build_config.h", $lines, [System.Text.Encoding]::ASCII)
-          Write-Output "build_config.h generated"
+
+          # 生成后立即校验，防止静默降级回落到源码默认值
+          $p = "native\src\build_config.h"
+          if (-not (Test-Path $p)) { Write-Error "build_config.h not created"; exit 1 }
+          $c = Get-Content $p -Raw
+          if ($c -match 'REPLACE_ME' -or $c -notmatch 'SEED_A') {
+            Write-Error "build_config.h has placeholder or missing SEED_A"
+            exit 1
+          }
+          if ($c -match 'SEED_SALT\s+0x9E3779B9u') {
+            Write-Error "build_config.h still contains default SEED_SALT"
+            exit 1
+          }
+          Write-Output "build_config.h generated and verified"
 
       - name: 编译 decryptor.node
         shell: pwsh
@@ -225,14 +238,27 @@ jobs:
           CHK_C: ${{ steps.gen.outputs.seed_c }}
           CHK_D: ${{ steps.gen.outputs.seed_d }}
         run: |
+          # 长度兜底：seed 生成失败时给出明确报错，而不是 PowerShell 异常栈
+          if ($env:CHK_A.Length -lt 16 -or $env:CHK_B.Length -lt 16 -or
+              $env:CHK_C.Length -lt 16 -or $env:CHK_D.Length -lt 16) {
+            Write-Error "Seed outputs too short. gen step failed."
+            exit 1
+          }
+
           $bytes = [System.IO.File]::ReadAllBytes("native\build\Release\decryptor.node")
           $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+
           $missing = @()
           if (-not $text.Contains($env:CHK_A.Substring(0, 16))) { $missing += 'SEED_A' }
           if (-not $text.Contains($env:CHK_B.Substring(0, 16))) { $missing += 'SEED_B' }
           if (-not $text.Contains($env:CHK_C.Substring(0, 16))) { $missing += 'SEED_C' }
           if (-not $text.Contains($env:CHK_D.Substring(0, 16))) { $missing += 'SEED_D' }
-          if ($missing.Count -gt 0) { Write-Error "FAIL: $($missing -join ', ')"; exit 1 }
+
+          if ($missing.Count -gt 0) {
+            Write-Error "FAIL: $($missing -join ', ') not found in binary"
+            Write-Error "说明: build_config.h 未生效，或 -D 宏传递失败"
+            exit 1
+          }
           Write-Output "OK: SEED anchors present"
 
       - name: 上传产物
