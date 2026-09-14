@@ -125,7 +125,7 @@ jobs:
             "#define SEED_B       `"$env:BC_SEED_B`"",
             "#define SEED_C       `"$env:BC_SEED_C`"",
             "#define SEED_D       `"$env:BC_SEED_D`"",
-            "#define SEED_SALT    $env:BC_SEED_SALT`u",
+            "#define SEED_SALT    $($env:BC_SEED_SALT)u",
             ""
           )
           [System.IO.File]::WriteAllLines(
