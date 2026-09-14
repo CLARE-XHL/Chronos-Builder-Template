@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       game_name:
-        description: '游戏名称（必填）'
+        description: '游戏名称（必填，1-64 字符）'
         required: true
         type: string
       game_version:
@@ -21,7 +21,6 @@ jobs:
     runs-on: windows-2022
     permissions:
       contents: read
-      actions: write
 
     steps:
       - name: 拉取仓库代码
@@ -31,8 +30,9 @@ jobs:
         shell: pwsh
         run: |
           if ([string]::IsNullOrWhiteSpace($env:CS_GAME_NAME)) { Write-Error "game_name empty"; exit 1 }
-          if ($env:CS_GAME_VERSION -notmatch '^[0-9A-Za-z._-]+$') { Write-Error "game_version invalid: $env:CS_GAME_VERSION"; exit 1 }
-          Write-Output "Input OK: name=$env:CS_GAME_NAME version=$env:CS_GAME_VERSION"
+          if ($env:CS_GAME_NAME.Length -gt 64) { Write-Error "game_name too long"; exit 1 }
+          if ($env:CS_GAME_VERSION -notmatch '^[0-9A-Za-z._-]+$') { Write-Error "game_version invalid"; exit 1 }
+          Write-Output "Input OK"
 
       - name: 计算构建日期
         id: build_date
@@ -61,21 +61,6 @@ jobs:
         working-directory: native
         run: npm install --ignore-scripts
 
-      - name: 生成字符串密文表
-        shell: pwsh
-        run: |
-          $content = & python tools/gen_str_table.py
-          if ($LASTEXITCODE -ne 0) { Write-Error "gen_str_table.py failed"; exit 1 }
-          if (-not $content) { Write-Error "gen_str_table.py produced no output"; exit 1 }
-          [System.IO.File]::WriteAllLines(
-            (Resolve-Path "native").Path + "\src\cs_str_table.h",
-            $content,
-            [System.Text.Encoding]::ASCII
-          )
-          $size = (Get-Item "native\src\cs_str_table.h").Length
-          if ($size -lt 1000) { Write-Error "cs_str_table.h too small ($size bytes)"; exit 1 }
-          Write-Output "cs_str_table.h generated: $size bytes"
-
       - name: 生成分片种子
         id: gen
         shell: pwsh
@@ -85,12 +70,10 @@ jobs:
             [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($b)
             return -join ($b | ForEach-Object { $_.ToString('x2') })
           }
-
           $seedA = New-Hex 12
           $seedB = New-Hex 12
           $seedC = New-Hex 12
           $seedD = New-Hex 12
-
           $saltBytes = New-Object byte[] 4
           [System.Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($saltBytes)
           $seedSalt = [BitConverter]::ToUInt32($saltBytes, 0)
@@ -100,66 +83,86 @@ jobs:
           "seed_c=$seedC" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "seed_d=$seedD" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           "seed_salt=$seedSalt" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
-
           $fullSeed = $seedA + $seedB + $seedC + $seedD
           "seed=$fullSeed" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Output "Seeds generated"
 
-          Write-Output "Seeds generated (hex, 24 chars each)"
+      # ★ 生成字符串密文表（混入 build salt）
+      - name: 生成字符串密文表
+        shell: pwsh
+        env:
+          CS_BUILD_SALT: ${{ steps.gen.outputs.seed_salt }}
+        run: |
+          $content = & python tools/gen_str_table.py
+          if ($LASTEXITCODE -ne 0) { Write-Error "gen_str_table failed"; exit 1 }
+          if (-not $content) { Write-Error "no output"; exit 1 }
+          [System.IO.File]::WriteAllLines(
+            (Resolve-Path "native").Path + "\src\cs_str_table.h",
+            $content,
+            [System.Text.Encoding]::ASCII
+          )
+          $size = (Get-Item "native\src\cs_str_table.h").Length
+          if ($size -lt 1000) { Write-Error "too small"; exit 1 }
+          Write-Output "cs_str_table.h: $size bytes"
 
-      # ★ 生成 build_config.h（必须在 id: gen 之后，编译之前）
+      # ★ 生成 build_config.h（用 env: 传种子，不进日志）
       - name: 生成 build_config.h
         shell: pwsh
+        env:
+          BC_GAME_VERSION: ${{ github.event.inputs.game_version }}
+          BC_RELEASE_DATE: ${{ steps.build_date.outputs.date }}
+          BC_SEED_A: ${{ steps.gen.outputs.seed_a }}
+          BC_SEED_B: ${{ steps.gen.outputs.seed_b }}
+          BC_SEED_C: ${{ steps.gen.outputs.seed_c }}
+          BC_SEED_D: ${{ steps.gen.outputs.seed_d }}
+          BC_SEED_SALT: ${{ steps.gen.outputs.seed_salt }}
         run: |
           $lines = @(
             "#pragma once",
-            "#define GAME_VERSION `"$env:CS_GAME_VERSION`"",
-            "#define RELEASE_DATE `"${{ steps.build_date.outputs.date }}`"",
-            "#define SEED_A       `"${{ steps.gen.outputs.seed_a }}`"",
-            "#define SEED_B       `"${{ steps.gen.outputs.seed_b }}`"",
-            "#define SEED_C       `"${{ steps.gen.outputs.seed_c }}`"",
-            "#define SEED_D       `"${{ steps.gen.outputs.seed_d }}`"",
-            "#define SEED_SALT    ${{ steps.gen.outputs.seed_salt }}u",
+            "#define GAME_VERSION `"$env:BC_GAME_VERSION`"",
+            "#define RELEASE_DATE `"$env:BC_RELEASE_DATE`"",
+            "#define SEED_A       `"$env:BC_SEED_A`"",
+            "#define SEED_B       `"$env:BC_SEED_B`"",
+            "#define SEED_C       `"$env:BC_SEED_C`"",
+            "#define SEED_D       `"$env:BC_SEED_D`"",
+            "#define SEED_SALT    $env:BC_SEED_SALT`u",
             ""
           )
           [System.IO.File]::WriteAllLines(
             "native\src\build_config.h", $lines, [System.Text.Encoding]::ASCII)
-          Write-Output "build_config.h generated:"
-          Get-Content "native\src\build_config.h"
+          Write-Output "build_config.h generated"
 
-      # ★ 编译：不再传任何 -D，全部走 header
-      - name: 编译 decryptor.node (MZ / x64)
+      - name: 编译 decryptor.node
         shell: pwsh
         run: |
           $vspath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -version "[17.0,18.0)" -property installationPath
-          if (-not $vspath) { Write-Error "Visual Studio 2022 not found"; exit 1 }
-
-          $arch = "x64"
-          $vsTarget = "x64"
-          $hostPath = "HostX64\x64"
-
+          if (-not $vspath) { Write-Error "VS2022 not found"; exit 1 }
           $msvcVersion = Get-ChildItem "$vspath\VC\Tools\MSVC" | Sort-Object { [version]$_.Name } -Descending | Select-Object -First 1 | Select-Object -ExpandProperty Name
-
           $env:VCINSTALLDIR = "$vspath\VC"
           $env:VSINSTALLDIR = "$vspath"
           $env:VCToolsInstallDir = "$vspath\VC\Tools\MSVC\$msvcVersion"
-          $env:VSCMD_ARG_TGT_ARCH = $vsTarget
+          $env:VSCMD_ARG_TGT_ARCH = "x64"
           $env:VSCMD_ARG_HOST_ARCH = "x64"
-          $env:PATH += ";$($env:VCToolsInstallDir)\bin\$hostPath"
-
+          $env:PATH += ";$($env:VCToolsInstallDir)\bin\HostX64\x64"
           cd native
-
-          node-gyp configure --msvs_version=2022 --arch=$arch
-          node-gyp build --release --msvs_version=2022 --arch=$arch
+          node-gyp configure --msvs_version=2022 --arch=x64
+          node-gyp build --release --msvs_version=2022 --arch=x64
 
       - name: 生成加密配置
         shell: pwsh
+        env:
+          CFG_GAME_NAME: ${{ github.event.inputs.game_name }}
+          CFG_GAME_VERSION: ${{ github.event.inputs.game_version }}
+          CFG_DATE: ${{ steps.build_date.outputs.date }}
+          CFG_SEED: ${{ steps.gen.outputs.seed }}
+          CFG_SEED_SALT: ${{ steps.gen.outputs.seed_salt }}
         run: |
           $config = [ordered]@{
-            gameName = $env:CS_GAME_NAME
-            version  = $env:CS_GAME_VERSION
-            date     = "${{ steps.build_date.outputs.date }}"
-            seed     = "${{ steps.gen.outputs.seed }}"
-            seedSalt = [uint32]"${{ steps.gen.outputs.seed_salt }}"
+            gameName = $env:CFG_GAME_NAME
+            version  = $env:CFG_GAME_VERSION
+            date     = $env:CFG_DATE
+            seed     = $env:CFG_SEED
+            seedSalt = [uint32]$env:CFG_SEED_SALT
           }
           $json = $config | ConvertTo-Json
           $utf8NoBom = New-Object System.Text.UTF8Encoding $false
@@ -167,17 +170,23 @@ jobs:
 
       - name: 生成作者密钥
         shell: pwsh
+        env:
+          AK_GAME_NAME: ${{ github.event.inputs.game_name }}
+          AK_GAME_VERSION: ${{ github.event.inputs.game_version }}
+          AK_DATE: ${{ steps.build_date.outputs.date }}
+          AK_SEED: ${{ steps.gen.outputs.seed }}
+          AK_SEED_SALT: ${{ steps.gen.outputs.seed_salt }}
         run: |
           $content = @"
           ============================================================
           Chronos Seal V2.2 - Author Secret Key
-          WARNING: This file is the sole credential for game encryption. Keep it safe!
-          Game Name:       $env:CS_GAME_NAME
-          Version:         $env:CS_GAME_VERSION
+          WARNING: Keep it safe!
+          Game Name:       $env:AK_GAME_NAME
+          Version:         $env:AK_GAME_VERSION
           Engine Target:   MZ_64bit
-          Release Date:    ${{ steps.build_date.outputs.date }}
-          Derivation Seed: ${{ steps.gen.outputs.seed }}
-          Seed Salt:       ${{ steps.gen.outputs.seed_salt }}
+          Release Date:    $env:AK_DATE
+          Derivation Seed: $env:AK_SEED
+          Seed Salt:       $env:AK_SEED_SALT
           Generated:       $(Get-Date -Format "yyyy-MM-dd HH:mm:ss UTC")
           ============================================================
           WARNING: DO NOT distribute this file with your game package!
@@ -187,73 +196,50 @@ jobs:
           [System.IO.File]::WriteAllText("author_secret.txt", $content, $utf8NoBom)
 
       - name: 校验产物
-        id: verify
         shell: pwsh
         run: |
-          $nodePath = "native\build\Release\decryptor.node"
-          if (-not (Test-Path $nodePath)) { Write-Error "decryptor.node not found"; exit 1 }
-          if (-not (Test-Path "encrypt_config.json")) { Write-Error "encrypt_config.json not found"; exit 1 }
-          if (-not (Test-Path "author_secret.txt")) { Write-Error "author_secret.txt not found"; exit 1 }
-          Write-Output "All artifacts generated successfully"
+          $p = "native\build\Release\decryptor.node"
+          if (-not (Test-Path $p)) { Write-Error "decryptor.node missing"; exit 1 }
+          if (-not (Test-Path "encrypt_config.json")) { Write-Error "config missing"; exit 1 }
+          if (-not (Test-Path "author_secret.txt")) { Write-Error "secret missing"; exit 1 }
+          Write-Output "All artifacts present"
 
       - name: 校验产物无明文 tag
         shell: pwsh
         run: |
-          $nodePath = "native\build\Release\decryptor.node"
-          if (-not (Test-Path $nodePath)) { Write-Error "decryptor.node not found"; exit 1 }
-
-          $bytes = [System.IO.File]::ReadAllBytes($nodePath)
-          $text  = [System.Text.Encoding]::ASCII.GetString($bytes)
-
-          $patterns = @(
-            'MASTER:', 'STAGE2:', 'STAGE3:', 'MASTER:FINAL',
-            'AES:S1:', 'AES:S2:', 'AES:S3:', 'AES:FINAL:',
-            'HMAC:S1:', 'HMAC:S2:', 'HMAC:S3:', 'HMAC:FINAL:'
-          )
-
+          $bytes = [System.IO.File]::ReadAllBytes("native\build\Release\decryptor.node")
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
+          $patterns = @('MASTER:', 'STAGE2:', 'STAGE3:', 'MASTER:FINAL',
+                        'AES:S1:', 'AES:S2:', 'AES:S3:', 'AES:FINAL:',
+                        'HMAC:S1:', 'HMAC:S2:', 'HMAC:S3:', 'HMAC:FINAL:')
           $found = @()
           foreach ($p in $patterns) { if ($text.Contains($p)) { $found += $p } }
-
-          if ($found.Count -gt 0) {
-            Write-Error "FAIL: plaintext tags found: $($found -join ', ')"
-            exit 1
-          }
-          Write-Output "OK: no plaintext tags in decryptor.node"
+          if ($found.Count -gt 0) { Write-Error "FAIL: $($found -join ', ')"; exit 1 }
+          Write-Output "OK: no plaintext tags"
 
       - name: 校验 SEED 已编入二进制
         shell: pwsh
+        env:
+          CHK_A: ${{ steps.gen.outputs.seed_a }}
+          CHK_B: ${{ steps.gen.outputs.seed_b }}
+          CHK_C: ${{ steps.gen.outputs.seed_c }}
+          CHK_D: ${{ steps.gen.outputs.seed_d }}
         run: |
-          $nodePath = "native\build\Release\decryptor.node"
-          if (-not (Test-Path $nodePath)) { Write-Error "decryptor.node not found"; exit 1 }
-
-          $bytes = [System.IO.File]::ReadAllBytes($nodePath)
-          $text  = [System.Text.Encoding]::ASCII.GetString($bytes)
-
-          $seedA = "${{ steps.gen.outputs.seed_a }}"
-          $seedB = "${{ steps.gen.outputs.seed_b }}"
-          $seedC = "${{ steps.gen.outputs.seed_c }}"
-          $seedD = "${{ steps.gen.outputs.seed_d }}"
-
-          if ($seedA.Length -lt 16 -or $seedB.Length -lt 16 -or $seedC.Length -lt 16 -or $seedD.Length -lt 16) {
-            Write-Error "Seed values too short"; exit 1
-          }
-
+          $bytes = [System.IO.File]::ReadAllBytes("native\build\Release\decryptor.node")
+          $text = [System.Text.Encoding]::ASCII.GetString($bytes)
           $missing = @()
-          if (-not $text.Contains($seedA.Substring(0, 16))) { $missing += 'SEED_A' }
-          if (-not $text.Contains($seedB.Substring(0, 16))) { $missing += 'SEED_B' }
-          if (-not $text.Contains($seedC.Substring(0, 16))) { $missing += 'SEED_C' }
-          if (-not $text.Contains($seedD.Substring(0, 16))) { $missing += 'SEED_D' }
-
-          if ($missing.Count -gt 0) {
-            Write-Error "FAIL: $($missing -join ', ') not found in binary"
-            exit 1
-          }
-          Write-Output "OK: SEED_A/B/C/D anchors present"
+          if (-not $text.Contains($env:CHK_A.Substring(0, 16))) { $missing += 'SEED_A' }
+          if (-not $text.Contains($env:CHK_B.Substring(0, 16))) { $missing += 'SEED_B' }
+          if (-not $text.Contains($env:CHK_C.Substring(0, 16))) { $missing += 'SEED_C' }
+          if (-not $text.Contains($env:CHK_D.Substring(0, 16))) { $missing += 'SEED_D' }
+          if ($missing.Count -gt 0) { Write-Error "FAIL: $($missing -join ', ')"; exit 1 }
+          Write-Output "OK: SEED anchors present"
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: chronos-seal-output-MZ
+          retention-days: 1
           path: |
             native\build\Release\decryptor.node
             encrypt_config.json
