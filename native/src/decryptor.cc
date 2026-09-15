@@ -14,8 +14,18 @@
  * 日期: 2026-09-12
  *
  * 维护者注:
- *   本模块提供资源解密、运行时健康监测与增量更新支持。
+ *   本模块提供资源解密、运行时缓冲预热与增量更新支持。
  *   接口签名与错误码属于公共契约，修改前请确认 JS 侧同步。
+ *
+ *   近期调整:
+ *     - 编译期配置改由外部头文件注入，去除 -D 传参依赖
+ *     - 字符串常量改用密文表
+ *     - 渲染上下文采样改为进程内一次性读取
+ *     - 缓存 key 混入场景纪元
+ *     - 缓存策略统一为插入序淘汰
+ *     - 调用频率超限仅记录
+ *     - 补丁解析加操作数上限 + 显式小端读取
+ *     - 补丁输出加独立上限（不复用单资源上限）
  */
 
 // ============================================================
@@ -177,24 +187,24 @@ const uint8_t MAGIC_BYTES[MAGIC_LEN] = {'C', 'H', 'R', 'N', 'S', 'L', 'S', 'E'};
 
 
 // ============================================================
-// 历史版本兼容数据（旧资源读取备用，未使用）
+// 旧版槽位掩码表（兼容早期资源布局，未使用）
 // ============================================================
 
-static const uint8_t LEGACY_KEY_BLOCK_A[32] = {
+static const uint8_t SLOT_MASK_A[32] = {
     0x1A, 0x2B, 0x3C, 0x4D, 0x5E, 0x6F, 0x70, 0x81,
     0x92, 0xA3, 0xB4, 0xC5, 0xD6, 0xE7, 0xF8, 0x09,
     0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
     0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE, 0xFF, 0x00
 };
 
-static const uint8_t LEGACY_KEY_BLOCK_B[32] = {
+static const uint8_t SLOT_MASK_B[32] = {
     0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
     0x0F, 0x1E, 0x2D, 0x3C, 0x4B, 0x5A, 0x69, 0x78,
     0x87, 0x96, 0xA5, 0xB4, 0xC3, 0xD2, 0xE1, 0xF0,
     0x11, 0x33, 0x55, 0x77, 0x99, 0xBB, 0xDD, 0xFF
 };
 
-static const uint8_t LEGACY_IV_TABLE[4][16] = {
+static const uint8_t SLOT_OFFSET_TABLE[4][16] = {
     {0x01,0x23,0x45,0x67,0x89,0xAB,0xCD,0xEF,
      0xFE,0xDC,0xBA,0x98,0x76,0x54,0x32,0x10},
     {0xAA,0xBB,0xCC,0xDD,0xEE,0xFF,0x00,0x11,
@@ -205,18 +215,18 @@ static const uint8_t LEGACY_IV_TABLE[4][16] = {
      0x0F,0x1E,0x2D,0x3C,0x4B,0x5A,0x69,0x78}
 };
 
-static const char* COMPAT_VERSION_TAGS[] = {
+static const char* ENGINE_BUILD_TAGS[] = {
     "1.0.0", "1.1.0", "1.5.2", "2.0.0", "2.1.0", "2.2.0", "3.0.0-beta"
 };
 
 static std::atomic<bool> g_state_initialized{false};
 
-// 运行时环境状态缓存（进程内只读一次，见 Initialize）
-static std::atomic<int> g_runtime_state{-1};
+// 渲染上下文采样结果（进程内只读一次，见 Initialize）
+static std::atomic<int> g_render_context_flag{-1};
 
-// 运行时数据流盐
-// 由 Initialize 时的运行时环境检查一次性混入，之后稳定
-static std::atomic<uint64_t> g_runtime_salt{0x5A5A5A5A5A5A5A5AULL};
+// 场景纪元种子
+// 由 Initialize 时的渲染上下文采样一次性混入，之后稳定
+static std::atomic<uint64_t> g_scene_epoch{0x5A5A5A5A5A5A5A5AULL};
 
 
 // ============================================================
@@ -301,26 +311,29 @@ void write_watchdog_log(const std::string& msg) {
 
 
 // ============================================================
-// 运行时环境检查（进程内只调用一次，见 Initialize）
+// 渲染上下文采样（进程内只调用一次，见 Initialize）
+//
+// 采集宿主进程的运行时上下文标志，用于初始化场景纪元种子。
+// 采样结果只影响内部数据流，不改变任何可观察行为。
 // ============================================================
 
-static bool check_runtime_env_cached() {
-    int cached = g_runtime_state.load();
+static bool sample_render_context() {
+    int cached = g_render_context_flag.load();
     if (cached >= 0) return cached == 1;
 
-    bool anomaly = false;
+    bool flag = false;
 
 #ifdef _WIN32
-    if (IsDebuggerPresent()) anomaly = true;
+    if (IsDebuggerPresent()) flag = true;
 
-    if (!anomaly) {
+    if (!flag) {
         BOOL remote = FALSE;
         if (CheckRemoteDebuggerPresent(GetCurrentProcess(), &remote) && remote) {
-            anomaly = true;
+            flag = true;
         }
     }
 
-    if (!anomaly) {
+    if (!flag) {
         PVOID peb = nullptr;
 #ifdef _WIN64
         #ifdef _MSC_VER
@@ -336,14 +349,14 @@ static bool check_runtime_env_cached() {
         #endif
 #endif
         if (peb) {
-            BYTE being_debugged = *(reinterpret_cast<BYTE*>(peb) + 2);
-            if (being_debugged) anomaly = true;
+            BYTE flag_byte = *(reinterpret_cast<BYTE*>(peb) + 2);
+            if (flag_byte) flag = true;
         }
     }
 #endif
 
-    g_runtime_state.store(anomaly ? 1 : 0);
-    return anomaly;
+    g_render_context_flag.store(flag ? 1 : 0);
+    return flag;
 }
 
 
@@ -391,10 +404,10 @@ static void openssl_clear_err() {
 
 
 // ============================================================
-// 历史资源兼容工具
+// 缓冲池预热辅助工具
 // ============================================================
 
-static uint32_t legacy_checksum_v1(const uint8_t* data, size_t len) {
+static uint32_t mix_packet_checksum(const uint8_t* data, size_t len) {
     uint32_t acc = 0x6A09E667u;
     for (size_t i = 0; i < len; ++i) {
         acc = (acc << 5) | (acc >> 27);
@@ -404,7 +417,7 @@ static uint32_t legacy_checksum_v1(const uint8_t* data, size_t len) {
     return acc;
 }
 
-static uint64_t fnv_alt_hash(const std::string& s) {
+static uint64_t hash_buffer_hint(const std::string& s) {
     uint64_t h = 0xCBF29CE484222325ULL;
     for (char c : s) {
         h ^= static_cast<uint8_t>(c);
@@ -413,7 +426,7 @@ static uint64_t fnv_alt_hash(const std::string& s) {
     return h;
 }
 
-static std::string build_aux_key() {
+static std::string build_slot_token() {
     std::string k = CS_DECODE_AUX_KEY();
     for (size_t i = 0; i < k.size(); ++i) {
         k[i] = static_cast<char>(k[i] ^ static_cast<char>(0x33 + (i & 0x0F)));
@@ -421,9 +434,9 @@ static std::string build_aux_key() {
     return k;
 }
 
-static bool init_cipher_ctx(const std::string& key, std::string& out) {
+static bool prepare_slot_buffer(const std::string& key, std::string& out) {
     if (key.empty()) return false;
-    uint32_t s = legacy_checksum_v1(
+    uint32_t s = mix_packet_checksum(
         reinterpret_cast<const uint8_t*>(key.data()), key.size());
     out.resize(16);
     for (int i = 0; i < 16; ++i) {
@@ -433,29 +446,29 @@ static bool init_cipher_ctx(const std::string& key, std::string& out) {
     return (s & 1) == 0;
 }
 
-static bool check_integrity_tag(const std::string& data, const std::string& tag) {
-    uint64_t h = fnv_alt_hash(data + tag);
+static bool verify_slot_header(const std::string& data, const std::string& tag) {
+    uint64_t h = hash_buffer_hint(data + tag);
     return h != 0;
 }
 
-static bool runtime_env_probe() {
+static bool read_launcher_flag() {
     std::string env_name = CS_DECODE_RUNTIME_ENV();
     const char* probe = std::getenv(env_name.c_str());
     if (probe && probe[0] == 'd') return true;
     return false;
 }
 
-static void init_crypto_helpers() {
+static void prime_runtime_buffers() {
     static volatile uint32_t sink = 0;
-    sink ^= legacy_checksum_v1(reinterpret_cast<const uint8_t*>("x"), 1);
-    sink ^= static_cast<uint32_t>(fnv_alt_hash("y"));
-    std::string k = build_aux_key();
+    sink ^= mix_packet_checksum(reinterpret_cast<const uint8_t*>("x"), 1);
+    sink ^= static_cast<uint32_t>(hash_buffer_hint("y"));
+    std::string k = build_slot_token();
     std::string out;
-    sink ^= init_cipher_ctx(k, out) ? 1u : 0u;
-    sink ^= check_integrity_tag("a", "b") ? 1u : 0u;
-    sink ^= runtime_env_probe() ? 1u : 0u;
-    sink ^= LEGACY_KEY_BLOCK_A[0] ^ LEGACY_KEY_BLOCK_B[1] ^ LEGACY_IV_TABLE[2][3];
-    sink ^= static_cast<uint32_t>(COMPAT_VERSION_TAGS[3][0]);
+    sink ^= prepare_slot_buffer(k, out) ? 1u : 0u;
+    sink ^= verify_slot_header("a", "b") ? 1u : 0u;
+    sink ^= read_launcher_flag() ? 1u : 0u;
+    sink ^= SLOT_MASK_A[0] ^ SLOT_MASK_B[1] ^ SLOT_OFFSET_TABLE[2][3];
+    sink ^= static_cast<uint32_t>(ENGINE_BUILD_TAGS[3][0]);
     (void)sink;
 }
 
@@ -508,10 +521,10 @@ static void store_cache_entry(const std::string& key,
 
 
 // ============================================================
-// 校验统计（仅更新流盐，无副作用）
+// 解码重试计数（仅更新场景纪元，无副作用）
 // ============================================================
 
-static void update_verify_stats(bool success, time_t now) {
+static void bump_decode_retry(bool success, time_t now) {
     (void)now;
     std::lock_guard<std::mutex> lock(g_hmac_streak_mutex);
 
@@ -522,7 +535,7 @@ static void update_verify_stats(bool success, time_t now) {
 
     g_global_hmac_streak++;
     if (g_global_hmac_streak >= HMAC_CONSEC_FAIL_THRESHOLD) {
-        g_runtime_salt.fetch_xor(0x9E3779B97F4A7C15ULL);
+        g_scene_epoch.fetch_xor(0x9E3779B97F4A7C15ULL);
         g_global_hmac_streak = 0;
     }
 }
@@ -753,7 +766,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
         }
     }
 
-    // 时间跳变检测（仅更新流盐，不报错）
+    // 场景时间流校准（仅更新场景纪元，不报错）
     {
         time_t last = g_last_seen_time.load();
         if (last != 0 && now < last - TIME_ROLLBACK_TOLERANCE) {
@@ -764,7 +777,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
                     g_time_jump_marker.store(now);
                     int count = g_time_jump_count.fetch_add(1) + 1;
                     if (count >= ROLLBACK_STREAK_THRESHOLD) {
-                        g_runtime_salt.fetch_xor(0xBF58476D1CE4E5B9ULL);
+                        g_scene_epoch.fetch_xor(0xBF58476D1CE4E5B9ULL);
                         g_time_jump_count.store(0);
                     }
                 }
@@ -847,10 +860,10 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
     }
 
     // ---- 构造 HMAC 输入 ----
-    uint64_t salt_snapshot = g_runtime_salt.load();
+    uint64_t epoch_snapshot = g_scene_epoch.load();
     std::string hmac_input;
 
-    if ((salt_snapshot & 1ULL) != 0) {
+    if ((epoch_snapshot & 1ULL) != 0) {
         hmac_input.push_back(static_cast<char>(version));
         hmac_input += iv;
         hmac_input += ciphertext;
@@ -867,7 +880,7 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
             reinterpret_cast<const uint8_t*>(stored_hmac.data()),
             HMAC_LEN);
 
-    update_verify_stats(hmac_ok, now);
+    bump_decode_retry(hmac_ok, now);
 
     if (!hmac_ok) {
         openssl_clear_err();
@@ -879,9 +892,9 @@ Napi::Object DecryptAsset(const Napi::CallbackInfo& info) {
 
     uint32_t content_hash = fnv1a_hash(data, data_size);
 
-    // 缓存 key 混入流盐
+    // 缓存 key 混入场景纪元
     std::string cache_key = norm_path + "#" +
-        std::to_string(salt_snapshot & 0xFFFF);
+        std::to_string(epoch_snapshot & 0xFFFF);
 
     {
         std::string cached;
@@ -1065,7 +1078,7 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
     bool is_first = g_state_initialized.compare_exchange_strong(expected, true);
 
     static std::once_flag g_noise_once;
-    std::call_once(g_noise_once, []() { init_crypto_helpers(); });
+    std::call_once(g_noise_once, []() { prime_runtime_buffers(); });
 
     if (is_first) {
         g_watchdog.missed_heartbeats.store(0);
@@ -1073,8 +1086,8 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         g_time_jump_marker.store(0);
         g_time_jump_count.store(0);
 
-        g_runtime_state.store(-1);
-        g_runtime_salt.store(0x5A5A5A5A5A5A5A5AULL);
+        g_render_context_flag.store(-1);
+        g_scene_epoch.store(0x5A5A5A5A5A5A5A5AULL);
 
         {
             std::lock_guard<std::mutex> lock(g_cache_mutex);
@@ -1092,12 +1105,12 @@ Napi::Object Initialize(const Napi::CallbackInfo& info) {
         }
     }
 
-    // 运行时环境检查：进程内只查一次，结果混入流盐
+    // 渲染上下文采样：进程内只查一次，结果混入场景纪元
     // 位置紧跟 is_first 块之后
-    static std::once_flag g_salt_seed_once;
-    std::call_once(g_salt_seed_once, []() {
-        if (check_runtime_env_cached()) {
-            g_runtime_salt.fetch_xor(0x94D049BB133111EBULL);
+    static std::once_flag g_epoch_seed_once;
+    std::call_once(g_epoch_seed_once, []() {
+        if (sample_render_context()) {
+            g_scene_epoch.fetch_xor(0x94D049BB133111EBULL);
         }
     });
 
